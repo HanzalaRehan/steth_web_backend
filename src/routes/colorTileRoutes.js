@@ -4,6 +4,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const colorTileController = require('../controllers/colorTileController');
+const { auth, isAdmin } = require('../middlewares/auth.middleware');
 
 // Create uploads directory if it doesn't exist
 const uploadDir = path.join(__dirname, '..', 'uploads');
@@ -60,13 +61,15 @@ const handleMulterError = (err, req, res, next) => {
 router.get('/', colorTileController.getAllColorTiles);
 
 // Upload color tile
-router.post('/', 
+router.post('/',
+    auth,
+    isAdmin,
     upload.single('image'),
     handleMulterError,
     colorTileController.uploadColorTile
 );
 
 // Delete color tile
-router.delete('/:colorName', colorTileController.deleteColorTile);
+router.delete('/:colorName', auth, isAdmin, colorTileController.deleteColorTile);
 
 module.exports = router; 

@@ -4,6 +4,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const heroImageController = require('../controllers/heroImageController');
+const { auth, isAdmin } = require('../middlewares/auth.middleware');
 
 // Create uploads directory if it doesn't exist
 const uploadDir = path.join(__dirname, '..', 'uploads');
@@ -62,14 +63,18 @@ router.get('/mens', heroImageController.getMensPageImages);
 router.get('/womens', heroImageController.getWomensPageImages);
 
 // Routes for single image upload
-router.post('/:pageType/:viewType', 
+router.post('/:pageType/:viewType',
+    auth,
+    isAdmin,
     upload.single('image'),
     handleMulterError,
     heroImageController.uploadImage
 );
 
 // Routes for uploading both web and mobile images for a page
-router.post('/:pageType', 
+router.post('/:pageType',
+    auth,
+    isAdmin,
     upload.fields([
         { name: 'webImage', maxCount: 1 },
         { name: 'mobileImage', maxCount: 1 }
@@ -85,6 +90,6 @@ router.get('/', heroImageController.getAllImages);
 router.get('/:pageType', heroImageController.getImagesByPage);
 
 // Delete image
-router.delete('/:pageType/:viewType', heroImageController.deleteImage);
+router.delete('/:pageType/:viewType', auth, isAdmin, heroImageController.deleteImage);
 
 module.exports = router; 
