@@ -20,6 +20,11 @@ const heroImageRoutes = require('./routes/heroImageRoutes');
 const colorTileRoutes = require('./routes/colorTileRoutes');
 const subscriberRoutes = require('./routes/subscriberRoutes');
 const imageProxyRoutes = require('./routes/imageProxy.routes');
+const fabricRoutes = require('./routes/fabric.routes');
+const categoryRoutes = require('./routes/category.routes');
+const colorRoutes = require('./routes/color.routes');
+const vendorRoutes = require('./routes/vendor.routes');
+const shipmentRoutes = require('./routes/shipment.routes');
 
 const app = express();
 
@@ -101,6 +106,11 @@ app.use('/api/color-tiles', colorTileRoutes);
 app.use('/api/subscribers', subscriberRoutes);
 app.use('/api/test-email', testEmailRoutes);
 app.use('/api/image-proxy', imageProxyRoutes);
+app.use('/api/fabrics', fabricRoutes);
+app.use('/api/categories', categoryRoutes);
+app.use('/api/colors', colorRoutes);
+app.use('/api/vendors', vendorRoutes);
+app.use('/api/shipments', shipmentRoutes);
 
 // Enhanced error handling middleware for file uploads
 app.use((error, req, res, next) => {
