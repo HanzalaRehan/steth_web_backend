@@ -323,13 +323,13 @@ getAllOrders: async (req, res) => {
       }
       
       // Check if user is authorized to view this order
-      if (!req.user.isAdmin && order.user._id.toString() !== req.user._id.toString()) {
+      if (req.user.role !== 'admin' && (!order.user || order.user._id.toString() !== req.user._id.toString())) {
         return res.status(403).json({
           success: false,
           message: 'Not authorized to view this order'
         });
       }
-      
+
       return res.status(200).json({
         success: true,
         order
