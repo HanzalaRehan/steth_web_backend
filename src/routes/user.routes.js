@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/user.controller');
-const { auth, authenticateResetToken } = require('../middlewares/auth.middleware'); // Updated import
+const { auth, isAdmin, authenticateResetToken } = require('../middlewares/auth.middleware'); // Updated import
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -14,7 +14,7 @@ router.post('/google-auth', userController.googleAuthUser);
 
 // Authenticated user routes
 router.get('/profile', auth, userController.profileAccess);
-router.get('/profile-admin', userController.profileAccessAdmin);
+router.get('/profile-admin', auth, isAdmin, userController.profileAccessAdmin);
 router.post('/password-update', auth, userController.changePass);
 router.put('/update-account', auth, userController.updateAccount);
 
@@ -22,7 +22,7 @@ router.put('/update-account', auth, userController.updateAccount);
 router.put('/update-account-with-pic', auth, upload.single('profilePicture'), userController.updateAccount);
 
 // Keep your existing profile picture upload route
-router.post('/upload-pic', upload.single('profilePicture'), userController.uploadPicture);
+router.post('/upload-pic', auth, isAdmin, upload.single('profilePicture'), userController.uploadPicture);
 
 router.post('/password-forgot', userController.forgotPass);
 router.post('/verify-otp', userController.verifyOtp);

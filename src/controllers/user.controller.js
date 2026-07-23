@@ -218,7 +218,7 @@ const profileAccess = async (req, res) => {
 };
 
 const profileAccessAdmin = async (req, res) => {
-  const id = "68421e1deca16ba302078926";
+  const id = req.user._id;
 
   try {
       const user = await User.findOne({ _id: id }).lean();
@@ -424,7 +424,7 @@ const changePass = async (req, res) => {
 
 const uploadPicture = async (req, res) => {
   try {
-    const id = "68421e1deca16ba302078926";
+    const id = req.user._id;
     const user = await User.findById(id);
 
     if (!user) {
