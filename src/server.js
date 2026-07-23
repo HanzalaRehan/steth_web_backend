@@ -25,6 +25,8 @@ const categoryRoutes = require('./routes/category.routes');
 const colorRoutes = require('./routes/color.routes');
 const vendorRoutes = require('./routes/vendor.routes');
 const shipmentRoutes = require('./routes/shipment.routes');
+const giftCardRoutes = require('./routes/giftCard.routes');
+const blogPostRoutes = require('./routes/blogPost.routes');
 
 const app = express();
 
@@ -111,6 +113,8 @@ app.use('/api/categories', categoryRoutes);
 app.use('/api/colors', colorRoutes);
 app.use('/api/vendors', vendorRoutes);
 app.use('/api/shipments', shipmentRoutes);
+app.use('/api/gift-cards', giftCardRoutes);
+app.use('/api/blog-posts', blogPostRoutes);
 
 // Enhanced error handling middleware for file uploads
 app.use((error, req, res, next) => {

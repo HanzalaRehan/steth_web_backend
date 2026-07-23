@@ -89,6 +89,15 @@ const orderSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  giftCardCode: {
+    type: String,
+    default: ''
+  },
+  giftCardAmount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   shippingCharges: {
     type: Number,
     required: true,

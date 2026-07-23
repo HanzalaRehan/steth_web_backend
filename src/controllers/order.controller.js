@@ -1,6 +1,7 @@
 const Order = require('../models/order.model');
 const User = require('../models/user.model');
 const Product = require('../models/product.model');
+const GiftCard = require('../models/giftCard.model');
 const StudentVerification = require('../models/student.model');
 const { uploadToImageKit } = require('../utils/imageKitUpload');
 
@@ -45,19 +46,45 @@ const orderController = {
             reasons: [],
             pointsUsed: 0
           },
+          giftCardCode = '',
+          giftCardAmountApplied = 0,
           paymentMethod
         } = orderData;
-        
+
         const userId = req.user ? req.user._id : null;
-        
+
         // Validate items in order
         if (!items || !items.length) {
-          return res.status(400).json({ 
-            success: false, 
-            message: 'No items in order' 
+          return res.status(400).json({
+            success: false,
+            message: 'No items in order'
           });
         }
-        
+
+        // Gift card: mirrors the reward-points pattern (bounded, checked
+        // amount folded into the order's discount math client-side already
+        // - see discountInfo.amount) but re-validated here since it's real
+        // transferable balance, unlike the points/discount numbers this
+        // function otherwise trusts as-is from the request body. Fail fast
+        // rather than create an order with a discount that can't actually
+        // be redeemed against the card.
+        let giftCard = null;
+        if (giftCardCode) {
+          giftCard = await GiftCard.findOne({ code: giftCardCode.toUpperCase().trim() });
+          if (!giftCard || !giftCard.isActive || giftCard.expiryDate < new Date()) {
+            return res.status(400).json({
+              success: false,
+              message: 'Gift card is no longer valid'
+            });
+          }
+          if (Number(giftCardAmountApplied) > giftCard.currentBalance) {
+            return res.status(400).json({
+              success: false,
+              message: 'Gift card balance is lower than the applied amount'
+            });
+          }
+        }
+
         // Get user for points information if user is logged in
         let user = null;
         if (userId) {
@@ -178,6 +205,8 @@ const orderController = {
           total: Number(total),
           pointsUsed: pointsToUse,
           pointsEarned,
+          giftCardCode: giftCard ? giftCard.code : '',
+          giftCardAmount: giftCard ? Number(giftCardAmountApplied) : 0,
           paymentMethod,
           isFirstOrder,
           paymentReceipt: receiptData,
@@ -197,7 +226,21 @@ const orderController = {
           user.rewardPoints = user.rewardPoints - pointsToUse + pointsEarned;
           await user.save();
         }
-        
+
+        // Decrement the gift card balance now that the order actually
+        // exists - same non-transactional, after-order-save timing as the
+        // points update above (this function has no transaction wrapper
+        // anywhere; matching its existing pattern rather than introducing
+        // a partially-atomic one).
+        if (giftCard) {
+          giftCard.currentBalance -= Number(giftCardAmountApplied);
+          if (giftCard.currentBalance <= 0) {
+            giftCard.currentBalance = 0;
+            giftCard.isActive = false;
+          }
+          await giftCard.save();
+        }
+
         // Send email notifications
         try {
           if (customerInfo && customerInfo.email) {
