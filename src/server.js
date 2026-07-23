@@ -54,6 +54,17 @@ app.use((req, res, next) => {
 });
 
 // CORS configuration
+// TODO(stethset-unified-master-plan.md, Part A/A5): CORS is wide open in production.
+// Do NOT restrict until the admin panel is merged onto one origin (Part D step 2) —
+// it currently calls this API cross-origin from its own separate Vercel deployment
+// (client-side fetch() in ~15+ page files, e.g. app/orders/[id]/update-status,
+// app/product-management/**, app/color-tiles, app/hero-images).
+// Eventual allowlist needs at minimum:
+//   - Steth_web_frontend's production Vercel origin
+//   - Steth_admin_Panel's production Vercel origin (exact domain not confirmed —
+//     no vercel.json/.env checked into either repo; get this from the admin panel's
+//     Vercel project before implementing)
+//   - local dev origins (Vite default http://localhost:5173, Next default http://localhost:3000)
 app.use(cors());  // Allow all origins during development
 
 // Modify your helmet configuration to properly allow images from your origin
