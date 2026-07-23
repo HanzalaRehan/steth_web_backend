@@ -20,10 +20,24 @@ const productSchema = new Schema({
         type: String,
         required: [true, 'Product category is required'],
     },
+    // New, optional reference to the Category collection (Part B.1) - the
+    // string field above is untouched and stays the source of truth for
+    // every existing read path; this is additive for new admin/relational
+    // features only. See Steth_web_backend PROGRESS.md for why this isn't
+    // a straight retype of `category`.
+    categoryRef: {
+        type: Schema.Types.ObjectId,
+        ref: 'Category'
+    },
+    // New, optional reference to the Fabric collection (Part B.1).
+    fabric: {
+        type: Schema.Types.ObjectId,
+        ref: 'Fabric'
+    },
     gender: {
         type: String,
         required: [true, 'Gender specification is required'],
-        enum: ['Men', 'Women','Unisex', 'Male', 'Female']
+        enum: ['Men', 'Women', 'Unisex']
     },
     // Available colors (basic info)
     colors: [{
@@ -33,6 +47,36 @@ const productSchema = new Schema({
             type: Boolean,
             default: true
         }
+    }],
+    // New, optional references into the shared Color collection (Part B.1)
+    // - `colors` above is untouched, this is additive for admin/relational
+    // features (e.g. a future storefront "shop by color" swatch UI).
+    colorRefs: [{
+        type: Schema.Types.ObjectId,
+        ref: 'Color'
+    }],
+    // Free-form descriptive attributes (Part B.1), e.g. "moisture-wicking".
+    // Same {name, iconUrl} shape as Fabric.attributes for consistency.
+    attributes: [{
+        name: String,
+        iconUrl: String
+    }],
+    // Per-color(+gender, for Unisex products) image sets (Part B.1). New
+    // products populate this going forward; old products have an empty
+    // array here and keep rendering via defaultImages/colorImages exactly
+    // as before - see getImagesForColor below for the fallback logic.
+    variants: [{
+        color: String, // matches colors[].name convention, not a ref
+        gender: String, // only meaningful when this product's gender is 'Unisex'
+        images: [{
+            url: String,
+            alt: String,
+            isPrimary: {
+                type: Boolean,
+                default: false
+            },
+            fileId: String
+        }]
     }],
     // Available sizes (basic info)
     sizes: [{
@@ -175,7 +219,21 @@ productSchema.methods.recalculateTotalStock = async function() {
 };
 
 // Add a new method to get images for a specific color
-productSchema.methods.getImagesForColor = function(color) {
+// `gender` is only relevant for Unisex products with separate per-gender
+// variant image sets (Part B.1) - omit it for Men/Women products.
+productSchema.methods.getImagesForColor = function(color, gender) {
+    if (this.variants && this.variants.length > 0) {
+        const variant = this.variants.find(v =>
+            v.color === color && (!gender || v.gender === gender)
+        );
+        if (variant && variant.images && variant.images.length > 0) {
+            return variant.images;
+        }
+    }
+
+    // Fall back to the legacy per-color/default images every existing
+    // product already has - keeps old products (and new ones that haven't
+    // populated `variants`) rendering exactly as before.
     const colorImageSet = this.colorImages.find(ci => ci.color === color);
     return colorImageSet ? colorImageSet.images : this.defaultImages;
 };

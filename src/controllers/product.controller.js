@@ -67,6 +67,9 @@ exports.getAllProducts = catchAsync(async (req, res) => {
 exports.getProduct = catchAsync(async (req, res) => {
   const product = await Product.findById(req.params.id)
     .populate('relatedProducts') // Include full related product details
+    .populate('fabric')
+    .populate('categoryRef')
+    .populate('colorRefs') // Part B.1 - populate() on an absent ref just returns null/[], safe for old products
 
   if (!product) {
     return res.status(404).json({
