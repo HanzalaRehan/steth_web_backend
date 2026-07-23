@@ -28,7 +28,7 @@ const {
 
 // Base product routes
 router.get('/', getAllProducts);
-router.post('/', createProduct);
+router.post('/', auth, isAdmin, createProduct);
 
 // "Customers Also Bought" management (MUST come before `/:id` routes)
 router.get('/cob', getCustomersAlsoBoughtProducts);
@@ -37,16 +37,16 @@ router.put('/customers-also-bought/remove', removeFromCustomersAlsoBought);
 
 // Parameterized routes (must come after static routes)
 router.get('/:id', getProduct);
-router.put('/:id', updateProduct);
-router.delete('/:id', deleteProduct);
+router.put('/:id', auth, isAdmin, updateProduct);
+router.delete('/:id', auth, isAdmin, deleteProduct);
 
 // Color-specific routes
-router.post('/:id/images/default', upload.array('images', 10), uploadDefaultImages);
-router.post('/:id/images/color/:color', upload.array('images', 10), uploadColorImages);
+router.post('/:id/images/default', auth, isAdmin, upload.array('images', 10), uploadDefaultImages);
+router.post('/:id/images/color/:color', auth, isAdmin, upload.array('images', 10), uploadColorImages);
 router.get('/:id/images', getProductImagesByColor);
 
 // Inventory management
-router.post('/:id/inventory', updateInventory);
+router.post('/:id/inventory', auth, isAdmin, updateInventory);
 
 // Primary image management
 router.patch('/:id/images/color/:color/:imageId/primary', setPrimaryColorImage);
