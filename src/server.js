@@ -19,6 +19,7 @@ const contactRoutes = require('./routes/contact.routes');
 const heroImageRoutes = require('./routes/heroImageRoutes');
 const colorTileRoutes = require('./routes/colorTileRoutes');
 const subscriberRoutes = require('./routes/subscriberRoutes');
+const imageProxyRoutes = require('./routes/imageProxy.routes');
 
 const app = express();
 
@@ -99,6 +100,7 @@ app.use('/api/hero-images', heroImageRoutes);
 app.use('/api/color-tiles', colorTileRoutes);
 app.use('/api/subscribers', subscriberRoutes);
 app.use('/api/test-email', testEmailRoutes);
+app.use('/api/image-proxy', imageProxyRoutes);
 
 // Enhanced error handling middleware for file uploads
 app.use((error, req, res, next) => {
