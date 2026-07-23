@@ -68,7 +68,31 @@ And run `node src/scripts/backfillIsVerified.js` once before relying on the logi
 ## What's left / next session
 Per Part D: step 2 — Issue #1 (merge admin panel) + B.2 (RBAC), the natural point to also revisit A5's CORS lockdown and the `req.user.isAdmin` dead-code check in `cancelOrder`.
 
-## Related-but-out-of-scope findings (flagged, not fixed this session)
-- `profileAccessAdmin` (`user.controller.js`, routed unauthenticated at `GET /profile-admin`) has the same hardcoded-id pattern as A1's bug but wasn't named in A1's scope.
-- `product.routes.js`'s `PATCH /:id/images/color/:color/:imageId/primary` and `GET /fix-product/:id` are also unguarded mutating/admin-ish routes, not among A2's 6 named routes.
-- `cancelOrder`'s `req.user.isAdmin` check is dead code (no such field on `User`, only `role`) — doesn't block A4's required behavior, but worth folding into B.2's real RBAC work.
+## Related-but-out-of-scope findings (flagged, not fixed in that session)
+- `profileAccessAdmin` (`user.controller.js`, routed unauthenticated at `GET /profile-admin`) has the same hardcoded-id pattern as A1's bug but wasn't named in A1's scope. **Fixed in the next session below.**
+- `product.routes.js`'s `PATCH /:id/images/color/:color/:imageId/primary` and `GET /fix-product/:id` are also unguarded mutating/admin-ish routes, not among A2's 6 named routes. **Fixed in the next session below.**
+- `cancelOrder`'s `req.user.isAdmin` check is dead code (no such field on `User`, only `role`) — doesn't block A4's required behavior, but worth folding into B.2's real RBAC work. **Still not fixed** (only `getOrderById` had the same bug fixed, see below — `cancelOrder` itself wasn't touched again this session).
+
+---
+
+## Session: Issue #1 (admin panel merge) + Part B.2 (RBAC) (2026-07-23, same day)
+
+Spans all three repos. This repo's half: real RBAC middleware + guards on every admin-facing route the migrated admin screens touch, plus two small supporting pieces (JWT `role` claim, image-proxy route). Commits in order (`git log`, oldest first):
+
+1. **RBAC foundation** — `src/middlewares/auth.middleware.js`: `isAdmin` refactored into a generic `authorize(...allowedRoles)` factory; `isAdmin` is now `authorize('admin')`, a backward-compatible alias, so no existing route needed to change. `src/models/user.model.js`: `role` enum gained `warehouse_manager` and `marketer` (no screen actually needs them yet — see decision below). `user.controller.js`: `role` added to the signed JWT payload in both `loginUser` and `googleAuthUser` (previously only `id`/`username`/`email` — `googleAuthUser` didn't return `role` in its response at all, meaning admin login via Google was silently dead code in the frontend).
+2. **Groups A–G** — guarded every admin-facing route the migration's 19 screens actually call, plus a few severe ones that aren't called by any screen but were cheap to close while touching sibling files:
+   - A: all 4 `dashboard.routes.js` routes.
+   - B: `studentVerification.routes.js` `/pending`, `/:id/approve`, `/:id/reject`.
+   - C: `user.routes.js` `GET /profile-admin`, `POST /upload-pic` — bundled fix: `profileAccessAdmin`/`uploadPicture` had the same hardcoded-`_id` bug as A1, now read `req.user._id`.
+   - D: `product.routes.js` customers-also-bought add/remove, the primary-image-set PATCH, `fix-product` GET (the last two aren't called by any migrated screen but are clearly admin-only, no plausible anonymous caller).
+   - E: `heroImageRoutes.js`/`colorTileRoutes.js` POST/DELETE (GETs stay public, storefront depends on them).
+   - F: `subscriberRoutes.js` `POST /send-bulk-email` — the single worst gap in the whole audit, anyone could mass-email every subscriber.
+   - G: `testEmail.routes.js` (all 3 routes) — a leftover unauthenticated debug tool sending real email via production SMTP to a hardcoded personal address; not called by any screen but gated anyway given the severity.
+3. **New `GET /api/image-proxy?url=...`** (`src/routes/imageProxy.routes.js` + controller) — the Student Approval screen needs to display a proof-of-enrollment image without a CORS failure. Unlike the Next.js original (which proxied *any* URL — an open proxy), this is restricted to `ik.imagekit.io` only and gated `auth, isAdmin` (student PII).
+4. **`getOrderById` fix** — found while wiring the Orders update-status screen to use this single-order endpoint (see the frontend's PROGRESS.md for why). Same bug class as `cancelOrder`'s A4 fix, not caught last session because A4 only asked about `cancelOrder`: checked `req.user.isAdmin` (doesn't exist, only `role`), so an admin viewing any order that wasn't their own got a 403. Now checks `req.user.role !== 'admin'`, plus a null-safe guard for guest orders.
+
+**Decision, `PUT /:id/related` never got built:** the plan initially called for a new backend route so the frontend's "customers also bought" edit screen could save related products. Found that the existing, already-guarded `PUT /api/products/:id` has a generic "apply all other fields" pass that already accepts a `relatedProducts` array in the body — a dedicated route would have just duplicated that. Fixed at the frontend layer instead (point the ported screen at the existing endpoint).
+
+**Not touched this session:** A5 (CORS) — still exactly as left last session, still correctly deferred (see above). `cancelOrder`'s own dead `isAdmin` check — only `getOrderById`'s copy of the same bug got fixed, since that's the one actually blocking a screen being built this session; `cancelOrder`'s copy remains for a future pass. `warehouse_manager`/`marketer` roles exist in the enum per explicit instruction, but no route or screen distinguishes them from `admin` yet — none of the 19 migrated screens map to a warehouse-only or marketing-only resource today.
+
+Verification: `node --check` on every changed file (clean). Live HTTP verification wasn't attempted again this session — the sandbox limitations documented above for the last session apply identically; no new investigation was done to see if they'd changed.
