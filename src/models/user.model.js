@@ -27,7 +27,7 @@ const userSchema = new Schema({
     role: {
       type: String,
       default: 'customer',
-      enum: ['customer', 'admin']
+      enum: ['customer', 'admin', 'warehouse_manager', 'marketer']
     },
     rewardPoints: { type: Number, default: 0 },
     firstOrderPlaced: { type: Boolean, default: false },

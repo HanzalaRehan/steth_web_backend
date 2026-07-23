@@ -33,22 +33,19 @@ const auth = async (req, res, next) => {
     }
 };
 
-const isAdmin = async (req, res, next) => {
-    try {
-        if (req.user.role !== 'admin') {
-            return res.status(403).json({
-                success: false,
-                message: 'Access denied. Admin privileges required.'
-            });
-        }
-        next();
-    } catch (error) {
-        res.status(500).json({
+// Generic role gate. Must run after `auth` (needs req.user populated).
+const authorize = (...allowedRoles) => (req, res, next) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+        return res.status(403).json({
             success: false,
-            message: 'Server error'
+            message: `Access denied. Requires role: ${allowedRoles.join(' or ')}.`
         });
     }
+    next();
 };
+
+// Backward-compatible alias for existing admin-only routes.
+const isAdmin = authorize('admin');
 
 function authenticateResetToken(req, res, next) {
     const authHeader = req.headers['authorization'];
@@ -90,6 +87,7 @@ function authenticateResetToken(req, res, next) {
 module.exports = {
     auth,
     isAdmin,
+    authorize,
     authenticateResetToken,
     // isVerifiedStudent
-}; 
+};

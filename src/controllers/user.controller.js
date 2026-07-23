@@ -48,12 +48,13 @@ const googleAuthUser = async (req, res) => {
     const tokenPayload = {
       id: user._id,
       username: user.username,
-      email: user.email
+      email: user.email,
+      role: user.role
     };
 
     const accessToken = jwt.sign(tokenPayload, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
 
-    res.status(200).json({ message: 'Login with Google successful', accessToken });
+    res.status(200).json({ message: 'Login with Google successful', accessToken, role: user.role });
   } catch (err) {
     console.error('Google login error:', err);
     res.status(400).json({ message: 'Invalid Google token' });
@@ -182,7 +183,8 @@ const loginUser = async (req, res) => {
     const payload = {
       id: user._id,
       username: user.username,
-      email: user.email
+      email: user.email,
+      role: user.role
     };
 
     const accessToken = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '2d' });
