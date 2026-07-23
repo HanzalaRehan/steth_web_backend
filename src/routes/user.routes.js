@@ -16,7 +16,7 @@ router.post('/google-auth', userController.googleAuthUser);
 router.get('/profile', auth, userController.profileAccess);
 router.get('/profile-admin', userController.profileAccessAdmin);
 router.post('/password-update', auth, userController.changePass);
-router.put('/update-account', userController.updateAccount);
+router.put('/update-account', auth, userController.updateAccount);
 
 // Route for updating account with profile picture
 router.put('/update-account-with-pic', auth, upload.single('profilePicture'), userController.updateAccount);

@@ -401,7 +401,7 @@ const uploadPicture = async (req, res) => {
 
 const updateAccount = async (req, res) => {
   try {
-    const id = "68421e1deca16ba302078926";
+    const id = req.user._id;
     const { username, currentPassword, newPassword } = req.body;
     
     const user = await User.findById(id);
