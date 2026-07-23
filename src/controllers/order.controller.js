@@ -421,23 +421,23 @@ cancelOrder: async (req, res) => {
     }
     
     // Check if user is authorized to cancel this order
-    if (!req.user.isAdmin && order.user._id.toString() !== req.user._id.toString()) {
+    if (!order.user || (!req.user.isAdmin && order.user._id.toString() !== req.user._id.toString())) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to cancel this order'
       });
     }
-    
+
     // Check if order can be cancelled (only if it's pending or processing)
-    if (!['Pending', 'Processing'].includes(order.status)) {
+    if (!['Pending', 'Processing'].includes(order.orderStatus)) {
       return res.status(400).json({
         success: false,
-        message: `Cannot cancel order with status: ${order.status}`
+        message: `Cannot cancel order with status: ${order.orderStatus}`
       });
     }
-    
+
     // Update order status to cancelled
-    order.status = 'Cancelled';
+    order.orderStatus = 'Cancelled';
     
     // Return items to inventory
     for (const item of order.items) {
