@@ -39,7 +39,8 @@ const googleAuthUser = async (req, res) => {
         email,
         password: '', // No password because it's Google-authenticated
         authProvider: 'google',
-        googleId
+        googleId,
+        isVerified: true // Google-authenticated accounts are pre-verified
       });
       await user.save();
     }
@@ -112,12 +113,21 @@ const registerUser = async (req, res) => {
     
     await Promise.race([
       newUser.save(),
-      new Promise((_, reject) => 
+      new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Database save timeout')), 10000)
       )
     ]);
 
-    res.status(201).json({ message: 'User created successfully' });
+    try {
+      await sendOtp(newUser);
+    } catch (otpErr) {
+      console.error('Failed to send registration OTP:', otpErr);
+    }
+
+    res.status(201).json({
+      message: 'Registration successful. Please check your email for a verification code.',
+      email: newUser.email
+    });
   } catch (err) {
     console.error('Registration error:', err);
     
@@ -160,6 +170,13 @@ const loginUser = async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(400).json({ message: 'Invalid username/email or password' });
+    }
+
+    if (!user.isVerified) {
+      return res.status(403).json({
+        message: 'Please verify your email before logging in.',
+        email: user.email
+      });
     }
 
     const payload = {
@@ -282,6 +299,44 @@ const verifyOtp = async(req, res) => {
       resetToken // This token will be used to authenticate the password reset request
     });
 
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Verify OTP sent at registration and mark the account as verified
+const verifyRegistrationOtp = async(req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({ message: 'Email and OTP are required' });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(400).json({ message: 'User not found' });
+    }
+
+    if (user.isVerified) {
+      return res.status(400).json({ message: 'Account already verified' });
+    }
+
+    if (user.otp !== otp) {
+      return res.status(400).json({ message: 'Invalid OTP' });
+    }
+
+    if (user.otpExpires && user.otpExpires < Date.now()) {
+      return res.status(400).json({ message: 'OTP has expired' });
+    }
+
+    user.isVerified = true;
+    user.otp = null;
+    user.otpExpires = null;
+    await user.save();
+
+    res.status(200).json({ message: 'Email verified successfully. You can now log in.' });
   } catch (err) {
     console.log(err);
     res.status(500).json({ message: 'Server error' });
@@ -558,6 +613,7 @@ module.exports = {
   profileAccess,
   forgotPass,
   verifyOtp,
+  verifyRegistrationOtp,
   setNewPassword,
   changePass,
   uploadPicture,

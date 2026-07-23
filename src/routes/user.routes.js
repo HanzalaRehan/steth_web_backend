@@ -26,6 +26,7 @@ router.post('/upload-pic', upload.single('profilePicture'), userController.uploa
 
 router.post('/password-forgot', userController.forgotPass);
 router.post('/verify-otp', userController.verifyOtp);
+router.post('/verify-registration-otp', userController.verifyRegistrationOtp);
 router.post('/set-new-password', authenticateResetToken, userController.setNewPassword);
 router.post('/resend-otp', userController.resendOtp);
 router.get('/validate-token', userController.auth);
