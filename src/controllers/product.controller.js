@@ -593,6 +593,96 @@ exports.uploadColorImages = asyncHandler(async (req, res) => {
   }
 });
 
+/**
+ * Upload per-gender image set for a color variant. Only meaningful for
+ * Unisex products, where the same color needs separate Men/Women image
+ * sets - writes into product.variants, not colorImages (Part B.1).
+ */
+exports.uploadVariantImages = asyncHandler(async (req, res) => {
+  const { id: productId, color, gender } = req.params;
+
+  if (!['Men', 'Women'].includes(gender)) {
+    return res.status(400).json({
+      success: false,
+      message: "gender must be 'Men' or 'Women'"
+    });
+  }
+
+  const product = await Product.findById(productId);
+
+  if (!product) {
+    return res.status(404).json({
+      success: false,
+      message: 'Product not found'
+    });
+  }
+
+  if (product.gender !== 'Unisex') {
+    return res.status(400).json({
+      success: false,
+      message: 'Per-gender variant images only apply to Unisex products'
+    });
+  }
+
+  const colorExists = product.colors.some(c => c.name === color);
+  if (!colorExists) {
+    return res.status(400).json({
+      success: false,
+      message: 'Color not found for this product'
+    });
+  }
+
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'Please upload at least one image'
+    });
+  }
+
+  const imagekitFolder = getImageKitFolder(productId, `${color}-${gender}`);
+  const uploadPromises = req.files.map((file, index) => {
+    const fileName = `${color}_${gender}_${Date.now()}_${index}`;
+    return uploadToImageKit(file.path, imagekitFolder, fileName);
+  });
+
+  try {
+    const imagekitResults = await Promise.all(uploadPromises);
+
+    const newImages = imagekitResults.map(result => ({
+      url: result.url,
+      alt: `${product.name} - ${color} - ${gender}`,
+      isPrimary: false,
+      fileId: result.fileId
+    }));
+
+    const variantIndex = product.variants.findIndex(v => v.color === color && v.gender === gender);
+
+    if (variantIndex === -1) {
+      product.variants.push({ color, gender, images: newImages });
+    } else {
+      product.variants[variantIndex].images = [
+        ...product.variants[variantIndex].images,
+        ...newImages
+      ];
+    }
+
+    await product.save();
+
+    const variantEntry = product.variants.find(v => v.color === color && v.gender === gender);
+
+    res.status(200).json({
+      success: true,
+      data: variantEntry ? variantEntry.images : []
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error uploading images to ImageKit',
+      error: error.message
+    });
+  }
+});
+
 exports.getProductImagesByColor = asyncHandler(async (req, res) => {
   const { id: productId } = req.params;
   const { color } = req.query;

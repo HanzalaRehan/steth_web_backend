@@ -18,6 +18,7 @@ const {
     updateInventory,
     uploadDefaultImages,
     uploadColorImages,
+    uploadVariantImages,
     setPrimaryColorImage,
     getProductImagesByColor,
     getCustomersAlsoBoughtProducts,
@@ -43,6 +44,7 @@ router.delete('/:id', auth, isAdmin, deleteProduct);
 // Color-specific routes
 router.post('/:id/images/default', auth, isAdmin, upload.array('images', 10), uploadDefaultImages);
 router.post('/:id/images/color/:color', auth, isAdmin, upload.array('images', 10), uploadColorImages);
+router.post('/:id/images/variant/:color/:gender', auth, isAdmin, upload.array('images', 10), uploadVariantImages);
 router.get('/:id/images', getProductImagesByColor);
 
 // Inventory management
