@@ -14,25 +14,35 @@ const ensureDirectoryExists = (directory) => {
 
 // Get all products with filtering
 exports.getAllProducts = catchAsync(async (req, res) => {
-  const { 
-    category, 
-    gender, 
+  const {
+    category,
+    gender,
     color,
-    minPrice, 
-    maxPrice, 
-    inStock = true, 
+    categoryRef,
+    colorRefs,
+    fabric,
+    minPrice,
+    maxPrice,
+    inStock = true,
     sort = '-createdAt',
     page = 1,
     limit = 20
   } = req.query;
-  
+
   // Build filter object
   const filter = { isActive: true };
-  
+
   if (category) filter.category = category;
   if (gender) filter.gender = gender;
   if (color) filter['colors.name'] = color;
-  
+
+  // Additive ref-based filters (Part B.1's categoryRef/colorRefs/fabric),
+  // alongside the legacy string filters above rather than replacing them -
+  // existing callers passing `category`/`color` names keep working.
+  if (categoryRef) filter.categoryRef = categoryRef;
+  if (colorRefs) filter.colorRefs = colorRefs; // Mongoose matches array-contains for a single ObjectId
+  if (fabric) filter.fabric = fabric;
+
   if (minPrice || maxPrice) {
     filter.price = {};
     if (minPrice) filter.price.$gte = Number(minPrice);
