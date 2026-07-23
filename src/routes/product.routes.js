@@ -32,8 +32,8 @@ router.post('/', auth, isAdmin, createProduct);
 
 // "Customers Also Bought" management (MUST come before `/:id` routes)
 router.get('/cob', getCustomersAlsoBoughtProducts);
-router.put('/customers-also-bought/add', addToCustomersAlsoBought);
-router.put('/customers-also-bought/remove', removeFromCustomersAlsoBought);
+router.put('/customers-also-bought/add', auth, isAdmin, addToCustomersAlsoBought);
+router.put('/customers-also-bought/remove', auth, isAdmin, removeFromCustomersAlsoBought);
 
 // Parameterized routes (must come after static routes)
 router.get('/:id', getProduct);
@@ -49,8 +49,8 @@ router.get('/:id/images', getProductImagesByColor);
 router.post('/:id/inventory', auth, isAdmin, updateInventory);
 
 // Primary image management
-router.patch('/:id/images/color/:color/:imageId/primary', setPrimaryColorImage);
+router.patch('/:id/images/color/:color/:imageId/primary', auth, isAdmin, setPrimaryColorImage);
 // In your routes file or controller
-router.get('/fix-product/:id', fixStock);
+router.get('/fix-product/:id', auth, isAdmin, fixStock);
 
 module.exports = router;
