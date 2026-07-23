@@ -96,3 +96,41 @@ Spans all three repos. This repo's half: real RBAC middleware + guards on every 
 **Not touched this session:** A5 (CORS) — still exactly as left last session, still correctly deferred (see above). `cancelOrder`'s own dead `isAdmin` check — only `getOrderById`'s copy of the same bug got fixed, since that's the one actually blocking a screen being built this session; `cancelOrder`'s copy remains for a future pass. `warehouse_manager`/`marketer` roles exist in the enum per explicit instruction, but no route or screen distinguishes them from `admin` yet — none of the 19 migrated screens map to a warehouse-only or marketing-only resource today.
 
 Verification: `node --check` on every changed file (clean). Live HTTP verification wasn't attempted again this session — the sandbox limitations documented above for the last session apply identically; no new investigation was done to see if they'd changed.
+
+---
+
+## Session: Part B.1 — data model + admin CRUD for Fabric/Category/Color/Product/Inventory/Vendor/Shipment (2026-07-23)
+
+Additive throughout, per the plan reviewed and approved before any code was written (`~/.claude/plans/buzzing-cooking-pretzel.md`) — every new field is optional, every existing field on `Product` is untouched, no existing document needs to change for the app to keep working. Commits in order (`git log`, oldest first): models → Fabric/Category/Vendor CRUD → Color CRUD → Product schema extension → Shipment receive logic → route mounting → gender-check script → variant image upload endpoint.
+
+### New entities
+- `src/models/fabric.model.js`, `category.model.js`, `color.model.js`, `vendor.model.js`, `shipment.model.js` — all new, all `.model.js`-suffixed per this repo's convention for new entities.
+- `Fabric.composition` has a `pre('validate')` hook enforcing the array sums to 100% (within float tolerance) whenever non-empty — the real safety net behind the frontend's running-total builder.
+- Fabric/Category CRUD (`auth, isAdmin` on writes, public GETs) and Color CRUD (same, plus ImageKit title-image upload via the shared `upload.middleware.js` + `imageKitUpload.js` pattern, not a new multer config). **Vendor is gated differently**: every route including GETs requires `auth, authorize('admin', 'warehouse_manager')` — contact info is internal-only, and this is the first real call site for the multi-role `authorize()` factory built in the RBAC session.
+
+### `Product` extensions — all additive
+Added `fabric` (ref Fabric), `categoryRef` (ref Category, alongside the untouched `category` string), `colorRefs` (ref Color[], alongside the untouched `colors` array), `attributes` ([{name, iconUrl}]), `variants` ([{color, gender, images}] for per-color-per-gender image sets). `gender` enum narrowed from 5 values to exactly `['Men', 'Women', 'Unisex']`.
+
+**Gender enum narrowing — confirm before you rely on it.** I could not query the live database from this sandbox (same TLS wall as every prior session, see below) to check whether any existing product uses the removed `'Male'`/`'Female'` values. You explicitly chose to narrow the enum anyway rather than keep all 5. I've handed you `src/scripts/checkGenderValues.js` (read-only, lists any offending documents) — **run this yourself before any existing product gets re-saved**, since a `'Male'`/`'Female'` document would now fail validation on its next update. I attempted to run it from here; it failed with the same connectivity error documented below, so it has never actually executed against your real data.
+
+`getProduct`'s query now populates `fabric`, `categoryRef`, `colorRefs` — safe for old documents since populating an absent ref just returns `null`/`[]`. `getImagesForColor(color, gender)` checks `variants` first (matching color + gender when given), then falls back to the pre-existing `colorImages`/`defaultImages` logic — this is the actual mechanism keeping old and new products both working through the same storefront-facing endpoints.
+
+### Shipment receiving — the first atomic inventory-mutation path in this codebase
+`POST /api/shipments` creates and receives in one action (no separate draft/receive state, matching the plan). Each line item atomically increments `inventory.$.stock`/`totalStock` if the color/size row exists, or `$push`es a new row if it doesn't — all line items plus the Shipment document wrapped in one Mongoose transaction (`session.withTransaction`), so a bad line item (e.g. a deleted product) rolls back the whole receipt. Gated `auth, authorize('admin', 'warehouse_manager')`, same as Vendor. `deleteShipment` is explicitly a record-only delete — it does not reverse the inventory increment (documented in-code; use the Inventory tab's manual stock edit to undo a bad receipt).
+
+**Not unified:** this repo now has *four* different inventory-mutation code paths (the pre-existing `Product.updateStock` method, the pre-existing `updateInventory` controller, pre-existing inline logic in `createProduct`/`updateProduct`, and this session's new atomic Shipment-receive path). Reconciling them was flagged as explicitly out of scope for this session — the new path is correct for its own purpose, not a fix for the other three.
+
+### New variant-image upload endpoint (added after initial frontend wiring surfaced the gap)
+`POST /:id/images/variant/:color/:gender` (`auth, isAdmin`) — writes into `Product.variants`, separate from the existing `colorImages` path. Needed so the frontend's Unisex product flow can upload distinct Men/Women image sets for the same color while inventory stays one shared pool. Rejects with 400 if the product isn't `Unisex` or the gender isn't `Men`/`Women`.
+
+## Sandbox DB connectivity — confirmed dead again this session
+Attempted `node src/scripts/checkGenderValues.js` from this sandbox (after confirming you'd pointed me at dev/staging, per your explicit choice). It failed with the same `ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR` TLS-handshake failure against the Atlas cluster documented in every prior session's PROGRESS.md entry — this is a sandbox network-egress characteristic, not a regression or something new to investigate. No live verification (create a Fabric/Color/Product/Shipment, confirm storefront fetch endpoints) was possible here for the same reason. Run the commands below yourself once you're pointed at the real dev/staging database:
+```bash
+node src/scripts/checkGenderValues.js
+```
+Then, with the server running (`npm run dev`), exercise the new endpoints for real: create a Fabric (composition summing to 100), a Category, a Color, a Product referencing all three, and a Shipment against that product — confirm `totalStock`/`inventory` update, then hit `GET /api/products/:id` and a pre-existing (pre-B.1) product's `GET /api/products/:id` to confirm both still return successfully.
+
+## Optional backfill — not built
+The plan offered a script to link existing products' `category`/`colors` strings to real `Category`/`Color` documents. Not built or requested this session — old products don't need it to keep working (see "additive throughout" above); ask for it explicitly if you want existing catalog data linked up rather than just new products going forward.
+
+Verification: `node --check` on every new/changed file (clean, all of them, first attempt). Manual trace of the Shipment transaction logic against the schema. No live HTTP/DB verification — see above.
