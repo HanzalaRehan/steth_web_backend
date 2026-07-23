@@ -1,6 +1,7 @@
 // Create a new file: routes/testEmail.routes.js
 const express = require('express');
 const nodemailer = require('nodemailer');
+const { auth, isAdmin } = require('../middlewares/auth.middleware');
 const router = express.Router();
 
 // Configuration 1: Gmail with service (original)
@@ -85,7 +86,7 @@ const configs = {
 };
 
 // Test endpoint - pass config number as parameter
-router.post('/test/:configNumber', async (req, res) => {
+router.post('/test/:configNumber', auth, isAdmin, async (req, res) => {
   const configNumber = req.params.configNumber;
   const configKey = `config${configNumber}`;
   
@@ -155,7 +156,7 @@ router.post('/test/:configNumber', async (req, res) => {
 });
 
 // Test all configs at once
-router.post('/test-all', async (req, res) => {
+router.post('/test-all', auth, isAdmin, async (req, res) => {
   const results = [];
 
   for (let i = 1; i <= 6; i++) {
@@ -207,7 +208,7 @@ router.post('/test-all', async (req, res) => {
 });
 
 // Simple verify endpoint - just checks connection without sending
-router.get('/verify/:configNumber', async (req, res) => {
+router.get('/verify/:configNumber', auth, isAdmin, async (req, res) => {
   const configNumber = req.params.configNumber;
   const configKey = `config${configNumber}`;
   
