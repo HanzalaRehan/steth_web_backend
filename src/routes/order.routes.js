@@ -22,7 +22,7 @@ router.post('/calculate-discount', auth , discountController.calculateDiscountPr
 
 
 // Admin routes
-router.get('/all',orderController.getAllOrders);
-router.put('/update-status/:orderId',orderController.updateOrderStatus);
+router.get('/all', auth, isAdmin, orderController.getAllOrders);
+router.put('/update-status/:orderId', auth, isAdmin, orderController.updateOrderStatus);
 
 module.exports = router;
