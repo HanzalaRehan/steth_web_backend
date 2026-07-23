@@ -1,6 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const subscriberController = require('../controllers/subscriberController');
+const { auth, isAdmin } = require('../middlewares/auth.middleware');
 
 const router = express.Router();
 
@@ -25,6 +26,6 @@ const upload = multer({
 router.post('/subscribe', subscriberController.addSubscriber);
 
 // Send bulk email to all subscribers (with optional image attachments)
-router.post('/send-bulk-email', upload.array('images', 10), subscriberController.sendBulkEmail);
+router.post('/send-bulk-email', auth, isAdmin, upload.array('images', 10), subscriberController.sendBulkEmail);
 
 module.exports = router;
