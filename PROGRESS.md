@@ -183,3 +183,32 @@ New `statusHistory: [{status, changedAt}]` array on `Order`, populated in three 
 
 ### What's next
 Once a reachable dev/staging backend exists: place a real order, walk it through `Pending → Confirmed → Processing → Shipped → Delivered` via `PUT /api/orders/update-status/:orderId` (admin token), confirm `statusHistory` grows one entry per transition; confirm `cancelOrder` succeeds while `Pending`/`Processing` and 400s once `Shipped`/`Delivered`; confirm the address-save round trip via `GET /api/users/profile` after a checkout with the box checked.
+
+---
+
+## Session: Order management admin UI + tracking — Part B.1's order workflow (2026-07-24)
+
+Confirmed both prerequisites before starting: `statusHistory` (previous session) and the admin merge/RBAC (session 2) were both already done. Plan mode was used for the state-machine implementation and the label-generation architecture specifically, per your instruction — approved plan at the usual location.
+
+**State machine**: implemented exactly as your brief specified, which also matches the master plan's own recommendation for the previously-unresolved Confirmed-vs-Processing ambiguity — no correction needed. `Pending → (Confirm) → Confirmed → (Print Label, auto-advances) → Processing → (Shipped) → Shipped → (Deliver) → Delivered`, Cancel available from `Pending`/`Processing` only (existing eligibility check, unchanged).
+
+**Label-generation architecture — confirmed with you before building.** Your brief described "Node spawns a Python script (or calls an internal service)." This repo has no Python scripts, no PDF library, and no Dockerfile/Render config checked in, so there was no way to confirm python3 is actually available in the production container — a real subprocess today risked a silent `ENOENT` in prod for what's explicitly a stub. Built a pure-Node stub instead: new `src/services/labelService.js` exports `generateLabel(order)`, backed by the new `pdfkit` dependency (small, pure-JS, no native bindings). The function signature is the swap point for a real future carrier integration — route handlers never see or hardcode a carrier.
+
+### Blocking bug fixed, not a side quest
+`getAllOrders` had `if (req.query.status) filter.status = req.query.status;` — the schema field is `orderStatus`, not `status`, so this query param never actually filtered anything. This directly blocks the new tabbed dashboard (every tab's fetch depends on this param working), so it's fixed as part of this feature, not a tangential cleanup. Not touching `getOrderStats`'s separate `$group`/`$match` on the same wrong field name — that's a different screen's bug, out of scope here.
+
+### New endpoints (`order.controller.js`, `order.routes.js`)
+- `POST /api/orders/:orderId/generate-label` (admin) — generates the stub PDF, uploads it through the existing `uploadToImageKit` utility (reused, not a new storage provider — ImageKit accepts arbitrary files, not just images) into a new `shippingLabel: {url, generatedAt}` field on `Order`, auto-advances `orderStatus` to `Processing` with its own `statusHistory` push (bypasses `updateOrderStatus`, same pattern `cancelOrder` already used for the same reason - this transition carries an extra side effect the generic setter doesn't have).
+- `POST /api/orders/bulk-generate-labels` (admin) — body `{orderIds}`, loops the same per-order logic; no PDF-merging into one print job (not required by "stub the actual label content"); returns per-order `{orderId, success, url}` so a partial batch failure is visible, not silently dropped.
+- `PUT /api/orders/bulk-update-status` (admin) — body `{orderIds, status}`, powers every other bulk action (Confirm, direct-Ship, Deliver).
+
+### Refactor: shared single-order logic, reused by both single and bulk routes
+Extracted `updateSingleOrderStatus(orderId, status, trackingNumber)` out of the existing `updateOrderStatus` route handler — the single-order route now just calls it, and `bulkUpdateOrderStatus` loops it too, so bulk actions get the exact same `statusHistory` push and status-change email as a single action, instead of a raw `updateMany` that would silently skip both.
+
+**Real correctness gap caught while building this, not shipped**: `cancelOrder` does inventory return + reward-points reversal beyond a plain status flip. Routing bulk-Cancel through the generic `updateSingleOrderStatus` (as originally drafted) would have skipped both for every order in a bulk cancel — inventory would never come back, and used/earned points would never reverse. Fixed by extracting a second helper, `cancelSingleOrder(orderId, requestingUser)`, out of `cancelOrder` itself; `bulkUpdateOrderStatus` now special-cases `status === 'Cancelled'` to call this instead of the generic helper. `cancelOrder`'s route handler is now a thin wrapper around it, same as `updateOrderStatus`.
+
+### Verification
+`node --check` on all four changed/new files — clean, first attempt after fixing one real syntax error caught immediately (a `const` helper accidentally declared inline inside the `orderController` object literal instead of alongside it — invalid JS, not something that would have been caught by anything but running the check). `npm install pdfkit` succeeded; confirmed the module actually `require()`s successfully, not just installed. Manually traced all three status-transition paths (generic update, label-generation, cancel) against the schema and the existing `statusHistory`/inventory/points logic. Live order-creation → full status walk → bulk-action round trip wasn't possible from here — same standing sandbox limitation every backend session in this project has hit (can't reach the live Atlas cluster, and the real deployed backend doesn't have any of this project's work pushed to it).
+
+### What's next
+Once a reachable dev/staging backend exists: place a real order, walk it `Pending → Confirmed → (Print Label → auto-Processing) → Shipped → Delivered` through the new admin endpoints, confirm `statusHistory` and `shippingLabel` populate correctly at each step and that the customer-facing account overlay's timeline (built last session) reflects each transition live; confirm a bulk-cancel actually returns inventory and reverses points for every order in the batch, not just the first; confirm `bulk-generate-labels` reports partial failures correctly if one order in a batch is in a bad state.
