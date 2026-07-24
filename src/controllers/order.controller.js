@@ -17,6 +17,14 @@ const {
   sendOrderStatusUpdateToCustomer
 } = require('../utils/emailService');
 
+const { bumpCacheVersion } = require('../utils/cache');
+
+// Part B.5 - checkout (createOrder) and cancellation (cancelSingleOrder)
+// both mutate Product.inventory/totalStock directly, which the cached
+// product listings/details (product.controller.js) need to invalidate on -
+// same version-namespace as that controller's own invalidateProductCaches.
+const invalidateProductCaches = () => bumpCacheVersion('products');
+
 const calculatePoints = (amount) => {
   // 1 point for every 100 PKR
   return Math.floor(amount / 100);
@@ -96,6 +104,11 @@ const cancelSingleOrder = async (orderId, requestingUser) => {
       }
     }
   }
+
+  // Part B.5 - cancellation restores stock, which the cached product
+  // listings/details (isActive+totalStock filter, etc.) need to reflect.
+  // Once per cancellation, not per item - cheap Redis INCR either way.
+  if (order.items.length > 0) await invalidateProductCaches();
 
   if (order.pointsUsed > 0 || order.pointsEarned > 0) {
     const user = await User.findById(order.user._id);
@@ -254,10 +267,14 @@ const orderController = {
           // Deduct stock from inventory
           inventoryItem.stock -= item.quantity;
           product.totalStock -= item.quantity;
-        
+
           await product.save();
         }
-            
+
+        // Part B.5 - checkout deducts stock, which cached product
+        // listings/details need to reflect. Once per order, not per item.
+        if (items.length > 0) await invalidateProductCaches();
+
         // Calculate points earned from this order (based on the final total price, not subtotal)
         const pointsEarned = calculatePoints(total);
         
@@ -493,10 +510,23 @@ getAllOrders: async (req, res) => {
   getUserOrders: async (req, res) => {
     try {
       const userId = req.user._id;
+      // Part B.5 - this was unbounded (no skip/limit). Defaults to a limit
+      // generous enough that today's caller (AccountOverlay.jsx, which
+      // renders the whole list with no "load more" UI) keeps seeing every
+      // order for the overwhelming majority of real accounts, while still
+      // capping the true worst case instead of returning an ever-growing
+      // result set. page/limit query params are accepted for a future
+      // "load more" UI without another backend change.
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 50;
 
-      const orders = await Order.find({ user: userId })
+      const filter = { user: userId };
+      const total = await Order.countDocuments(filter);
+      const orders = await Order.find(filter)
         .populate('items.product', 'name images price')
-        .sort({ createdAt: -1 });
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit);
 
       // Issue #18 - orders created before statusHistory existed hydrate as
       // an empty array; give them a single synthesized entry instead of a
@@ -512,6 +542,11 @@ getAllOrders: async (req, res) => {
       return res.status(200).json({
         success: true,
         count: ordersWithHistory.length,
+        total,
+        pagination: {
+          page,
+          pages: Math.ceil(total / limit)
+        },
         orders: ordersWithHistory
       });
     } catch (error) {

@@ -1,10 +1,17 @@
 const Color = require('../models/color.model');
 const { catchAsync } = require('../utils/errorHandler');
 const { uploadToImageKit, deleteFromImageKit } = require('../utils/imageKitUpload');
+const { getOrSetCache, invalidateCache } = require('../utils/cache');
+
+// Part B.5 - see fabric.controller.js's identical comment.
+const CACHE_KEY = 'cache:colors:list';
 
 exports.getAllColors = catchAsync(async (req, res) => {
-    const colors = await Color.find().sort({ name: 1 });
-    res.status(200).json({ success: true, data: colors });
+    const responseBody = await getOrSetCache(CACHE_KEY, 300, async () => {
+        const colors = await Color.find().sort({ name: 1 });
+        return { success: true, data: colors };
+    });
+    res.status(200).json(responseBody);
 });
 
 exports.getColor = catchAsync(async (req, res) => {
@@ -30,6 +37,7 @@ exports.createColor = catchAsync(async (req, res) => {
     }
 
     const color = await Color.create(colorData);
+    await invalidateCache(CACHE_KEY);
     res.status(201).json({ success: true, data: color });
 });
 
@@ -57,6 +65,7 @@ exports.updateColor = catchAsync(async (req, res) => {
     }
 
     await color.save();
+    await invalidateCache(CACHE_KEY);
     res.status(200).json({ success: true, data: color });
 });
 
@@ -70,5 +79,6 @@ exports.deleteColor = catchAsync(async (req, res) => {
             console.error('Failed to delete color image from ImageKit:', err)
         );
     }
+    await invalidateCache(CACHE_KEY);
     res.status(200).json({ success: true, message: 'Color deleted successfully' });
 });

@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const Shipment = require('../models/shipment.model');
 const Product = require('../models/product.model');
 const { catchAsync } = require('../utils/errorHandler');
+const { bumpCacheVersion } = require('../utils/cache');
 
 exports.getAllShipments = catchAsync(async (req, res) => {
     const shipments = await Shipment.find()
@@ -107,6 +108,11 @@ exports.receiveShipment = catchAsync(async (req, res) => {
     } finally {
         await session.endSession();
     }
+
+    // Part B.5 - receiving a shipment mutates Product.inventory/totalStock
+    // directly (see Product.updateOne calls above), same version-namespace
+    // as product.controller.js's cached listings/details.
+    await bumpCacheVersion('products');
 
     res.status(201).json({ success: true, data: savedShipment });
 });

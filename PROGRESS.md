@@ -274,3 +274,39 @@ Added a clearly-commented placeholder immediately after the `/profile` route, ma
 
 ### What's next
 Once program rules exist (earn rate, redemption options, tiers if any - all still TBD per the master plan and your own explicit instruction this session), come back to the extension point in `user.routes.js` and build the real redemption endpoint against it.
+
+---
+
+## Session: Part B.5 — Performance optimization pass (2026-07-25)
+
+Dedicated audit pass. Checked earlier sessions' `PROGRESS.md` entries first for perf work already folded in elsewhere, so this session doesn't redo it: rrweb's storefront-side lazy-load and the #2 scroll/ScrollTrigger audit were both already done in prior sessions (analytics session and polish-cluster session respectively) - not touched again here. This entry covers only what B.5 itself still needed: caching, indexes, pagination, and compression. The frontend half (code-splitting, image params, bundle-size before/after) is documented in the frontend's own `PROGRESS.md`.
+
+### Redis caching (`src/utils/cache.js`, new)
+Built a generic read-through cache on top of the existing `getRedisConnection()` (`src/config/redis.js`, provisioned for the B.3 analytics queue) - reused, not a second Redis instance, per this file's own header comment and the `CLAUDE.md` boundary. `getOrSetCache(key, ttlSeconds, fetchFn)` falls back to running the real query if Redis is unreachable (best-effort, same philosophy as the analytics pipeline - a cache outage must never break a request), plus `invalidateCache(key)` for fixed-key caches and `getCacheVersion`/`bumpCacheVersion` for query-varying ones.
+
+**Two invalidation strategies, matched to each endpoint's shape:**
+- **Fixed-key** (`fabric.controller.js`, `category.controller.js`, `color.controller.js`'s `getAllFabrics`/`getAllCategories`/`getAllColors`): one cache key per list, directly invalidated (`invalidateCache`) on every create/update/delete.
+- **Versioned** (`product.controller.js`'s `getAllProducts`/`getProduct`/`getCustomersAlsoBoughtProducts`): product listings have unbounded filter/sort/page combinations, so each is cached under a `products` version counter instead of enumerable keys - any product write bumps the version, invalidating every previously cached variation at once. Wired into **all 11** of `product.controller.js`'s write handlers via a single `res.on('finish', ...)` hook per function (fires on real success only, regardless of which internal return path sent the response) rather than a call at every individual `res.json()` site.
+
+**Caught two invalidation gaps that weren't obvious from `product.controller.js` alone**: `order.controller.js`'s `createOrder` (deducts stock at checkout) and `cancelSingleOrder` (restores it) both mutate `Product.inventory`/`totalStock` directly, bypassing `product.controller.js` entirely - these run far more often than admin edits. Also `shipment.controller.js`'s `receiveShipment` (atomic inventory increment, Part B.1) does the same. All three now call `bumpCacheVersion('products')` (same version-namespace) after their mutation succeeds - found by grepping for every direct `Product.save()`/`Product.updateOne()` outside `product.controller.js`, not assumed.
+
+**Marketing KPI aggregations** (`analyticsDashboard.controller.js`'s `getKpis`/`getFunnel`/`getTopPages`/`getTopSearches`/`getReplaySessions`) cached with a flat 120-second TTL, no invalidation - per your explicit instruction, a short TTL alone is fine here since new analytics events arrive continuously anyway (invalidating on every event write would defeat the point of caching a dashboard hit repeatedly).
+
+### Indexes (audited actual query patterns first, not guessed)
+- **`Product`** had zero indexes despite being the highest-traffic read model. Added 8, matched exactly to `getAllProducts`' real filter/sort combinations (confirmed by reading the controller, not assumed): `{isActive,createdAt}` (default browse), `{isActive,category,createdAt}`, `{isActive,gender,createdAt}` (Men's/Women's pages), `{isActive,categoryRef}`, `{isActive,fabric}`, `{colorRefs}` (multikey), `{isCustomersAlsoBought,isActive}`, `{isActive,totalStock}` (inStock filter).
+- **`AnalyticsEvent`** gets a new `{type,timestamp}` index - `getFunnel` filters exactly on those two fields, which neither of the two existing indexes (`{sessionId,timestamp}`, `{type,page}`) covered well.
+- **Deliberately not indexed**: `AnalyticsSession`'s `entryPage`/`exitPage` (the `getTopPages` aggregation's `$match` is just a near-universal `$ne:null` existence check - low selectivity, an index wouldn't meaningfully help a groupby-everything query) and `ReplaySnapshot`'s `getReplaySessions` (no `$match` stage at all, a genuine full-collection scan by definition - no index changes that). `Fabric`/`Category`/`Color`'s existing `unique:true` on `name` already provides their only real index need.
+
+### Pagination
+`getAllProducts` and `getAllOrders` were already paginated (confirmed, not assumed - the latter's `orderStatus` filter bug was fixed in an earlier session). Added real skip/limit pagination to `getUserOrders` (`/api/orders/my-orders`), which was previously unbounded - defaults to a limit of 50 (generous enough that the existing frontend caller, which renders the whole list with no "load more" UI, keeps seeing every order for the overwhelming majority of real accounts) while still capping the true worst case; `page`/`limit` query params are accepted for a future "load more" UI without another backend change. `getAllFabrics`/`getAllCategories`/`getAllColors` are left unpaginated deliberately - these are small taxonomy/reference-data lists (categories/colors/fabrics for a scrubs storefront, not customer-order-scale data), not "catalog" in the product-listing sense the plan meant.
+
+### Compression (`compression` package, new dependency)
+`app.use(compression())` added early in `server.js`'s middleware stack (before `morgan`/static serving), so gzip applies to every route below it including `/uploads`. Note: Node's `compression` package only does gzip/deflate, not true brotli - brotli support would need either a different package or a CDN/reverse-proxy layer. This backend (a Render-hosted Express API, no CDN in front of it) gets gzip; the frontend's static assets get brotli automatically from Vercel's hosting layer already (platform-level, nothing to configure on this side).
+
+### Verification
+`node --check` on all 12 new/changed backend files - clean. Manually traced: the products cache-versioning invalidation from all 14 write paths (11 in `product.controller.js`, 2 in `order.controller.js`, 1 in `shipment.controller.js`); the KPI cache's 120s TTL against the dashboard's actual poll pattern; the new indexes against `getAllProducts`'s exact filter combinations.
+
+**No live Redis/MongoDB round trip was possible from this sandbox** - same standing limitation as every backend session in this project (no reachable Atlas cluster, no provisioned Redis anywhere yet). Static verification (syntax checks + code trace against actual query/mutation call sites) is what's actually been done here.
+
+### What's next
+Once Redis is actually provisioned (still the standing ask from the B.3 session) and a reachable dev/staging database exists: confirm a cache hit actually skips the DB query (add temporary logging or check Redis directly), confirm a product edit in the admin panel makes the storefront's product listing reflect it within the same request (version bump working), confirm `getUserOrders`' pagination response shape doesn't break `AccountOverlay.jsx`'s Orders tab (it doesn't send `page`/`limit` today, so it should just keep working against the default). Consider whether the versioned product cache key's `JSON.stringify` of the query-param object could grow into very long Redis keys under adversarial/bot query-param spam - not a real concern at current traffic, flagging for later if it ever becomes one.

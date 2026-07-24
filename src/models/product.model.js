@@ -170,6 +170,19 @@ const productSchema = new Schema({
     }
 }, { timestamps: true });
 
+// Part B.5 - indexes matching getAllProducts' actual filter/sort
+// combinations (audited from product.controller.js, not guessed).
+// isActive is always present in the filter (getAllProducts hardcodes it),
+// so it leads every compound index below.
+productSchema.index({ isActive: 1, createdAt: -1 }); // default: active, newest-first, no other filter
+productSchema.index({ isActive: 1, category: 1, createdAt: -1 }); // legacy string category filter
+productSchema.index({ isActive: 1, gender: 1, createdAt: -1 }); // Men's/Women's pages
+productSchema.index({ isActive: 1, categoryRef: 1 }); // Part B.1 ref-based category filter
+productSchema.index({ isActive: 1, fabric: 1 }); // fabric filter
+productSchema.index({ colorRefs: 1 }); // multikey - array-contains colorRefs filter
+productSchema.index({ isCustomersAlsoBought: 1, isActive: 1 }); // getCustomersAlsoBoughtProducts
+productSchema.index({ isActive: 1, totalStock: 1 }); // inStock==='true' filter
+
 // Calculate average rating
 productSchema.methods.calculateAverageRating = async function() {
     if (this.ratings.length === 0) {

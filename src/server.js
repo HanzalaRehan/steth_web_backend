@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
+const compression = require('compression');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const path = require('path');
@@ -94,6 +95,10 @@ app.use(helmet({
   },
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
+
+// Part B.5 - gzip/brotli response compression. Placed early so it applies
+// to every route below, including the /uploads static file server.
+app.use(compression());
 
 app.use(morgan('dev'));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));

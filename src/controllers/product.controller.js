@@ -4,6 +4,15 @@ const fs = require('fs');
 const { uploadToImageKit } = require('../utils/imageKitUpload');
 const asyncHandler = require('express-async-handler');
 const path = require('path');
+const { getOrSetCache, invalidateCache, getCacheVersion, bumpCacheVersion } = require('../utils/cache');
+
+// Part B.5 - product listings have unbounded filter/sort/page combinations,
+// so they're cached per-combination under a version counter rather than a
+// fixed key: any Product write bumps the version, which invalidates every
+// previously cached listing/detail variation at once instead of needing to
+// enumerate or SCAN for them. See invalidateProductCaches() below, called
+// from every product-mutating handler (create/update/delete/inventory).
+const invalidateProductCaches = () => bumpCacheVersion('products');
 
 // Create folder if it doesn't exist
 const ensureDirectoryExists = (directory) => {
@@ -51,47 +60,70 @@ exports.getAllProducts = catchAsync(async (req, res) => {
   
   // Check for in-stock items
   if (inStock === 'true') filter.totalStock = { $gt: 0 };
-  
-  // Execute query with pagination
-  const products = await Product.find(filter)
-    .sort(sort)
-    .skip((page - 1) * limit)
-    .limit(Number(limit))
-    .select('name price category gender defaultImages colorImages totalStock inventory'); // Select only necessary fields for listing
-    
-  // Get total count for pagination
-  const total = await Product.countDocuments(filter);
-  
-  res.status(200).json({
-    success: true,
-    count: products.length,
-    total,
-    pagination: {
-      page: Number(page),
-      pages: Math.ceil(total / limit)
-    },
-    data: products
+
+  // Part B.5 - read-heavy, low-churn public listing endpoint; cached per
+  // unique filter/sort/page combination under the current products cache
+  // version (bumped on any product write, see invalidateProductCaches above).
+  const version = await getCacheVersion('products');
+  const cacheKey = `cache:products:v${version}:${JSON.stringify({
+    category, gender, color, categoryRef, colorRefs, fabric, minPrice, maxPrice, inStock, sort, page, limit,
+  })}`;
+
+  const responseBody = await getOrSetCache(cacheKey, 300, async () => {
+    // Execute query with pagination
+    const products = await Product.find(filter)
+      .sort(sort)
+      .skip((page - 1) * limit)
+      .limit(Number(limit))
+      .select('name price category gender defaultImages colorImages totalStock inventory'); // Select only necessary fields for listing
+
+    // Get total count for pagination
+    const total = await Product.countDocuments(filter);
+
+    return {
+      success: true,
+      count: products.length,
+      total,
+      pagination: {
+        page: Number(page),
+        pages: Math.ceil(total / limit)
+      },
+      data: products
+    };
   });
+
+  res.status(200).json(responseBody);
 });
 
 exports.getProduct = catchAsync(async (req, res) => {
-  const product = await Product.findById(req.params.id)
-    .populate('relatedProducts') // Include full related product details
-    .populate('fabric')
-    .populate('categoryRef')
-    .populate('colorRefs') // Part B.1 - populate() on an absent ref just returns null/[], safe for old products
+  // Part B.5 - same version-namespace as getAllProducts (shares
+  // invalidateProductCaches()), so any product write invalidates both.
+  const version = await getCacheVersion('products');
+  const cacheKey = `cache:product:v${version}:${req.params.id}`;
 
-  if (!product) {
+  const responseBody = await getOrSetCache(cacheKey, 300, async () => {
+    const product = await Product.findById(req.params.id)
+      .populate('relatedProducts') // Include full related product details
+      .populate('fabric')
+      .populate('categoryRef')
+      .populate('colorRefs') // Part B.1 - populate() on an absent ref just returns null/[], safe for old products
+
+    if (!product) return null;
+
+    return {
+      success: true,
+      data: product // This now includes ALL fields from your schema
+    };
+  });
+
+  if (!responseBody) {
     return res.status(404).json({
       success: false,
       message: 'Product not found'
     });
   }
 
-  res.status(200).json({
-    success: true,
-    data: product // This now includes ALL fields from your schema
-  });
+  res.status(200).json(responseBody);
 });
 
 
@@ -140,6 +172,13 @@ exports.getProductColorDetails = catchAsync(async (req, res) => {
 });
 
 exports.createProduct = catchAsync(async (req, res) => {
+  // Part B.5 - fires once the response actually succeeds, regardless of
+  // which internal return path sent it, so every success case invalidates
+  // without needing a call at each individual res.json() site.
+  res.on('finish', () => {
+    if (res.statusCode >= 200 && res.statusCode < 300) invalidateProductCaches();
+  });
+
   const productData = req.body;
   
   // Validate required fields
@@ -278,6 +317,11 @@ exports.createProduct = catchAsync(async (req, res) => {
 });
 
 exports.updateProduct = catchAsync(async (req, res) => {
+  // Part B.5 - see createProduct's identical comment above.
+  res.on('finish', () => {
+    if (res.statusCode >= 200 && res.statusCode < 300) invalidateProductCaches();
+  });
+
   const productId = req.params.id;
   const updates = req.body;
 
@@ -442,6 +486,11 @@ exports.updateProduct = catchAsync(async (req, res) => {
 
 // Delete product (permanent deletion)
 exports.deleteProduct = catchAsync(async (req, res) => {
+  // Part B.5 - see createProduct's identical comment above.
+  res.on('finish', () => {
+    if (res.statusCode >= 200 && res.statusCode < 300) invalidateProductCaches();
+  });
+
   const product = await Product.findByIdAndDelete(req.params.id);
   
   if (!product) {
@@ -465,6 +514,11 @@ const getImageKitFolder = (productId, color = 'default') => {
  * Upload default product images to ImageKit
  */
 exports.uploadDefaultImages = asyncHandler(async (req, res) => {
+  // Part B.5 - see createProduct's identical comment above.
+  res.on('finish', () => {
+    if (res.statusCode >= 200 && res.statusCode < 300) invalidateProductCaches();
+  });
+
   const productId = req.params.id;
   const product = await Product.findById(productId);
   
@@ -522,6 +576,11 @@ exports.uploadDefaultImages = asyncHandler(async (req, res) => {
  * Upload color-specific product images to ImageKit
  */
 exports.uploadColorImages = asyncHandler(async (req, res) => {
+  // Part B.5 - see createProduct's identical comment above.
+  res.on('finish', () => {
+    if (res.statusCode >= 200 && res.statusCode < 300) invalidateProductCaches();
+  });
+
   const { id: productId, color } = req.params;
   const product = await Product.findById(productId);
   
@@ -609,6 +668,11 @@ exports.uploadColorImages = asyncHandler(async (req, res) => {
  * sets - writes into product.variants, not colorImages (Part B.1).
  */
 exports.uploadVariantImages = asyncHandler(async (req, res) => {
+  // Part B.5 - see createProduct's identical comment above.
+  res.on('finish', () => {
+    if (res.statusCode >= 200 && res.statusCode < 300) invalidateProductCaches();
+  });
+
   const { id: productId, color, gender } = req.params;
 
   if (!['Men', 'Women'].includes(gender)) {
@@ -724,6 +788,11 @@ exports.getProductImagesByColor = asyncHandler(async (req, res) => {
 
 // Set primary image for a color
 exports.setPrimaryColorImage = catchAsync(async (req, res) => {
+  // Part B.5 - see createProduct's identical comment above.
+  res.on('finish', () => {
+    if (res.statusCode >= 200 && res.statusCode < 300) invalidateProductCaches();
+  });
+
   const { id: productId, color, imageId } = req.params;
   
   const product = await Product.findById(productId);
@@ -773,6 +842,11 @@ exports.setPrimaryColorImage = catchAsync(async (req, res) => {
 
 // Update inventory for a specific color/size combination
 exports.updateInventory = catchAsync(async (req, res) => {
+  // Part B.5 - see createProduct's identical comment above.
+  res.on('finish', () => {
+    if (res.statusCode >= 200 && res.statusCode < 300) invalidateProductCaches();
+  });
+
   const { id: productId } = req.params;
   const { color, size, stock } = req.body;
   
@@ -940,6 +1014,11 @@ exports.getProductStats = catchAsync(async (req, res) => {
 });
 
 exports.addToCustomersAlsoBought = async (req, res) => {
+  // Part B.5 - see createProduct's identical comment above.
+  res.on('finish', () => {
+    if (res.statusCode >= 200 && res.statusCode < 300) invalidateProductCaches();
+  });
+
   try {
       const { productId } = req.body;
       
@@ -978,6 +1057,11 @@ exports.addToCustomersAlsoBought = async (req, res) => {
 };
 
 exports.removeFromCustomersAlsoBought = async (req, res) => {
+  // Part B.5 - see createProduct's identical comment above.
+  res.on('finish', () => {
+    if (res.statusCode >= 200 && res.statusCode < 300) invalidateProductCaches();
+  });
+
   try {
       const { productId } = req.body;
       
@@ -1018,16 +1102,22 @@ exports.removeFromCustomersAlsoBought = async (req, res) => {
 exports.getCustomersAlsoBoughtProducts = async (req, res) => {
   try {
       const limit = parseInt(req.query.limit) || 10;
-      
-      const products = await Product.find({ isCustomersAlsoBought: true, isActive: true })
-          .limit(limit)
-          .select('name category price description defaultImages colors sizes discount averageRating');
-      
-      return res.status(200).json({
-          success: true,
-          count: products.length,
-          data: products
+
+      // Part B.5 - same version-namespace as the other product endpoints.
+      const version = await getCacheVersion('products');
+      const responseBody = await getOrSetCache(`cache:products:cob:v${version}:${limit}`, 300, async () => {
+        const products = await Product.find({ isCustomersAlsoBought: true, isActive: true })
+            .limit(limit)
+            .select('name category price description defaultImages colors sizes discount averageRating');
+
+        return {
+            success: true,
+            count: products.length,
+            data: products
+        };
       });
+
+      return res.status(200).json(responseBody);
   } catch (error) {
       return res.status(500).json({
           success: false,
@@ -1038,6 +1128,11 @@ exports.getCustomersAlsoBoughtProducts = async (req, res) => {
 };
 
 exports.fixStock = catchAsync(async (req, res) => {
+    // Part B.5 - see createProduct's identical comment above.
+    res.on('finish', () => {
+      if (res.statusCode >= 200 && res.statusCode < 300) invalidateProductCaches();
+    });
+
     const productId = req.params.id;
     const product = await Product.findById(productId);
     
