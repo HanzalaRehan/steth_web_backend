@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const morgan = require('morgan');
@@ -27,6 +28,10 @@ const vendorRoutes = require('./routes/vendor.routes');
 const shipmentRoutes = require('./routes/shipment.routes');
 const giftCardRoutes = require('./routes/giftCard.routes');
 const blogPostRoutes = require('./routes/blogPost.routes');
+const analyticsRoutes = require('./routes/analytics.routes');
+const analyticsDashboardRoutes = require('./routes/analyticsDashboard.routes');
+const discountCodeRoutes = require('./routes/discountCode.routes');
+const affiliateRoutes = require('./routes/affiliate.routes');
 
 const app = express();
 
@@ -73,7 +78,11 @@ app.use((req, res, next) => {
 //     no vercel.json/.env checked into either repo; get this from the admin panel's
 //     Vercel project before implementing)
 //   - local dev origins (Vite default http://localhost:5173, Next default http://localhost:3000)
-app.use(cors());  // Allow all origins during development
+// origin:true reflects whatever Origin header the request sent - still wide
+// open, same permissiveness as before, but also allows credentials so the
+// analytics anonymous-session cookie (Part B.3) can round-trip cross-origin.
+app.use(cors({ origin: true, credentials: true }));
+app.use(cookieParser());
 
 // Modify your helmet configuration to properly allow images from your origin
 app.use(helmet({
@@ -115,6 +124,10 @@ app.use('/api/vendors', vendorRoutes);
 app.use('/api/shipments', shipmentRoutes);
 app.use('/api/gift-cards', giftCardRoutes);
 app.use('/api/blog-posts', blogPostRoutes);
+app.use('/api/analytics', analyticsRoutes);
+app.use('/api/analytics', analyticsDashboardRoutes);
+app.use('/api/discount-codes', discountCodeRoutes);
+app.use('/api/affiliates', affiliateRoutes);
 
 // Enhanced error handling middleware for file uploads
 app.use((error, req, res, next) => {

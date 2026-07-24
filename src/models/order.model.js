@@ -161,6 +161,13 @@ const orderSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  // Part B.4 - forward-compatible only. Not read/validated anywhere yet;
+  // lets a future storefront affiliate-attribution flow tag orders without
+  // another schema migration.
+  affiliateCode: {
+    type: String,
+    default: ''
+  },
   trackingNumber: {
     type: String
   },

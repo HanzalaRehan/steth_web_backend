@@ -2,6 +2,7 @@
 const User = require('../models/user.model');
 const Order = require('../models/order.model');
 const { calculateDiscount } = require('../utils/discountService'); // Extract to separate service
+const { findValidDiscountCode, computeCodeDiscount } = require('../utils/discountCodeService');
 
 const discountController = {
   /**
@@ -10,16 +11,16 @@ const discountController = {
    */
   calculateDiscountPreview: async (req, res) => {
     try {
-      const { subtotal, pointsToUse = 0 } = req.body;
+      const { subtotal, pointsToUse = 0, discountCode = '' } = req.body;
       const userId = req.user._id;
-      
+
       if (!subtotal) {
         return res.status(400).json({
           success: false,
           message: 'Subtotal is required'
         });
       }
-      
+
       // Get user for points validation and student status
       const user = await User.findById(userId);
       if (!user) {
@@ -28,7 +29,7 @@ const discountController = {
           message: 'User not found'
         });
       }
-      
+
       // Validate points usage
       if (pointsToUse > user.rewardPoints) {
         return res.status(400).json({
@@ -36,24 +37,52 @@ const discountController = {
           message: `Cannot use more points than available. You have ${user.rewardPoints} points.`
         });
       }
-      
-      // Calculate discount based on user status and order history
-      const { amount: discountAmount, reason: discountReason } = await calculateDiscount(userId, subtotal);
-      
+
+      // Automatic discount (first order + student, stack with each other - unchanged)
+      const { amount: automaticAmount, reason: automaticReason } = await calculateDiscount(userId, subtotal);
+
+      // Admin-managed discount code, if one was entered
+      let codeAmount = 0;
+      let matchedDiscountCode = null;
+      if (discountCode) {
+        matchedDiscountCode = await findValidDiscountCode(discountCode);
+        codeAmount = computeCodeDiscount(matchedDiscountCode, subtotal);
+      }
+
+      // Decision: mutually exclusive, best-of-two between the automatic
+      // discount and an entered code - not additive. Two promotional
+      // percentage mechanisms don't stack with each other; gift cards and
+      // reward points (below) are unrelated real-balance mechanisms and
+      // continue to combine on top of whichever one wins.
+      let discountAmount = automaticAmount;
+      let discountReason = automaticReason;
+      let discountSource = 'automatic';
+
+      if (codeAmount > automaticAmount) {
+        discountAmount = codeAmount;
+        discountReason = `Discount code: ${matchedDiscountCode.name}`;
+        discountSource = 'code';
+      }
+
+      if (discountCode && !matchedDiscountCode) {
+        discountSource = 'invalid_code';
+      }
+
       // Calculate points value
       const pointsDiscount = pointsToUse; // 1 point = 1 PKR
-      
+
       // Calculate final total
       const total = subtotal - discountAmount - pointsDiscount;
-      
+
       // Calculate points that would be earned from this purchase
       const pointsEarned = Math.floor(total / 100); // 1 point for every 100 PKR
-      
+
       return res.status(200).json({
         success: true,
         subtotal,
         discountAmount,
         discountReason,
+        discountSource,
         pointsDiscount,
         pointsToUse,
         pointsEarned,

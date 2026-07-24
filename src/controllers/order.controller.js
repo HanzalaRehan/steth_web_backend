@@ -5,6 +5,9 @@ const GiftCard = require('../models/giftCard.model');
 const StudentVerification = require('../models/student.model');
 const { uploadToImageKit } = require('../utils/imageKitUpload');
 const { generateLabel } = require('../services/labelService');
+const AnalyticsSession = require('../models/analyticsSession.model');
+const { findValidDiscountCode, computeCodeDiscount } = require('../utils/discountCodeService');
+const { calculateDiscount } = require('../utils/discountService');
 
 const { 
   sendVerificationRequestEmail, 
@@ -137,7 +140,8 @@ const orderController = {
           shippingCharges = 0, // ADD THIS LINE - Extract shipping charges
           total,
           discount,
-          discountCode = '',
+          discountCode = '', // note: unused - retained only for existing request-body shape compat
+          discountCodeInput = '', // Part B.4 - plaintext DiscountCode entered at checkout
           discountInfo = {
             amount: 0,
             reasons: [],
@@ -178,6 +182,21 @@ const orderController = {
             return res.status(400).json({
               success: false,
               message: 'Gift card balance is lower than the applied amount'
+            });
+          }
+        }
+
+        // Discount code (Part B.4) - real admin-defined value, re-validated
+        // server-side the same way the gift card is above rather than
+        // trusting discountInfo.amount alone. Only engaged when a code was
+        // actually entered; the no-code path below is completely unchanged.
+        let matchedDiscountCode = null;
+        if (discountCodeInput) {
+          matchedDiscountCode = await findValidDiscountCode(discountCodeInput);
+          if (!matchedDiscountCode) {
+            return res.status(400).json({
+              success: false,
+              message: 'Discount code is invalid, expired, or no longer active'
             });
           }
         }
@@ -287,6 +306,32 @@ const orderController = {
         const orderNumber = String(todayOrderCount + 1).padStart(3, '0');
         const orderId = `${dateStr}-${orderNumber}`;
 
+        // Decision (B.4): mutually exclusive, best-of-two between the
+        // automatic discount and an entered code - recomputed here (not
+        // just trusted from discountInfo.amount) only when a code was
+        // actually used, closing the preview/purchase gap if it expired or
+        // was deactivated in between. The no-code path is untouched: it
+        // keeps trusting `discount`/`discountInfo.reasons` from the client
+        // exactly as before.
+        let finalDiscountAmount = Number(discount);
+        let finalDiscountReason = discountInfo.reasons ? discountInfo.reasons.join(', ') : '';
+
+        if (matchedDiscountCode) {
+          const codeAmount = computeCodeDiscount(matchedDiscountCode, Number(subtotal));
+          const automaticAmount = userId
+            ? (await calculateDiscount(userId, Number(subtotal))).amount
+            : 0;
+
+          if (codeAmount > automaticAmount) {
+            finalDiscountAmount = codeAmount;
+            finalDiscountReason = `Discount code: ${matchedDiscountCode.name}`;
+          } else {
+            finalDiscountAmount = automaticAmount;
+            // automaticAmount winning with a code entered still means no
+            // automatic discount applies to guests (automaticAmount is 0)
+          }
+        }
+
         // Build order object with all required fields
         const finalOrderData = {
           orderId,
@@ -295,10 +340,8 @@ const orderController = {
           customerEmail: customerInfo?.email || shippingAddress?.email || null,
           subtotal: Number(subtotal),
           shippingCharges: Number(shippingCharges), // ADD THIS LINE - Include shipping charges
-          discount: Number(discount),
-          discountCode: discountInfo.reasons
-            ? discountInfo.reasons.join(', ')
-            : '',
+          discount: finalDiscountAmount,
+          discountCode: finalDiscountReason,
           total: Number(total),
           pointsUsed: pointsToUse,
           pointsEarned,
@@ -350,7 +393,25 @@ const orderController = {
         } catch (emailError) {
           console.log('Email notifications failed, but order was saved:', emailError);
         }
-        
+
+        // Analytics linking (B.3) - additive, best-effort. Links the
+        // anonymous session cookie (if present) to this customer at
+        // checkout, same as the login-time linking.
+        if (userId) {
+          try {
+            const sessionId = req.cookies?.steth_sid;
+            if (sessionId) {
+              await AnalyticsSession.findOneAndUpdate(
+                { sessionId },
+                { $set: { customerId: userId } },
+                { upsert: false }
+              );
+            }
+          } catch (analyticsErr) {
+            console.error('Analytics session linking failed (non-blocking):', analyticsErr.message);
+          }
+        }
+
         return res.status(201).json({
           success: true,
           message: 'Order created successfully',

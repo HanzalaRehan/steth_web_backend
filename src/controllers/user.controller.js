@@ -10,6 +10,7 @@ const path = require('path');
 const fs = require('fs');
 const { uploadToImageKit } = require('../utils/imageKitUpload');
 const { sendOtp,reSendOtp } = require('../utils/emailService');
+const AnalyticsSession = require('../models/analyticsSession.model');
 const { OAuth2Client } = require('google-auth-library');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -189,10 +190,26 @@ const loginUser = async (req, res) => {
 
     const accessToken = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '2d' });
 
-    res.status(200).json({ 
-      message: 'Login successful', 
-      accessToken, 
-      role: user.role 
+    // Analytics linking (B.3) - additive, best-effort. Links the anonymous
+    // session cookie (if present) to this customer without touching the
+    // login response/flow itself.
+    try {
+      const sessionId = req.cookies?.steth_sid;
+      if (sessionId) {
+        await AnalyticsSession.findOneAndUpdate(
+          { sessionId },
+          { $set: { customerId: user._id } },
+          { upsert: false }
+        );
+      }
+    } catch (analyticsErr) {
+      console.error('Analytics session linking failed (non-blocking):', analyticsErr.message);
+    }
+
+    res.status(200).json({
+      message: 'Login successful',
+      accessToken,
+      role: user.role
     });
   } catch (err) {
     console.log(err);
