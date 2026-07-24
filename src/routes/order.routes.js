@@ -24,5 +24,8 @@ router.post('/calculate-discount', auth , discountController.calculateDiscountPr
 // Admin routes
 router.get('/all', auth, isAdmin, orderController.getAllOrders);
 router.put('/update-status/:orderId', auth, isAdmin, orderController.updateOrderStatus);
+router.put('/bulk-update-status', auth, isAdmin, orderController.bulkUpdateOrderStatus);
+router.post('/:orderId/generate-label', auth, isAdmin, orderController.generateOrderLabel);
+router.post('/bulk-generate-labels', auth, isAdmin, orderController.bulkGenerateOrderLabels);
 
 module.exports = router;

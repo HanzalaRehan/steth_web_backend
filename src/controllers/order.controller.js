@@ -4,6 +4,7 @@ const Product = require('../models/product.model');
 const GiftCard = require('../models/giftCard.model');
 const StudentVerification = require('../models/student.model');
 const { uploadToImageKit } = require('../utils/imageKitUpload');
+const { generateLabel } = require('../services/labelService');
 
 const { 
   sendVerificationRequestEmail, 
@@ -17,7 +18,103 @@ const calculatePoints = (amount) => {
   // 1 point for every 100 PKR
   return Math.floor(amount / 100);
 };
-  
+
+// Shared by the single-order updateOrderStatus route and the bulk-update
+// route below, so both push the same statusHistory entry and send the same
+// email instead of the bulk path silently skipping either (which a raw
+// updateMany would do).
+const updateSingleOrderStatus = async (orderId, status, trackingNumber) => {
+  const order = await Order.findById(orderId).populate('user', 'email');
+
+  if (!order) {
+    return { success: false, orderId, message: 'Order not found' };
+  }
+
+  if (trackingNumber) {
+    order.trackingNumber = trackingNumber;
+  }
+
+  const statusChanged = order.orderStatus !== status;
+  order.orderStatus = status;
+
+  if (statusChanged) {
+    order.statusHistory.push({ status, changedAt: new Date() });
+  }
+
+  const updatedOrder = await order.save();
+
+  if (statusChanged) {
+    const emailToSend = order.customerEmail || order.user?.email;
+    if (emailToSend) {
+      try {
+        await sendOrderStatusUpdateToCustomer(updatedOrder, emailToSend);
+      } catch (emailError) {
+        console.log('Status update email failed, but order was updated:', emailError);
+      }
+    }
+  }
+
+  return { success: true, orderId, order: updatedOrder };
+};
+
+// Shared by the single-order cancelOrder route and bulkUpdateOrderStatus
+// below (when status === 'Cancelled') - cancellation has real side effects
+// (inventory return, points reversal) a plain status flip doesn't, so bulk
+// cancel needs this exact logic per order, not the generic
+// updateSingleOrderStatus helper above.
+const cancelSingleOrder = async (orderId, requestingUser) => {
+  const order = await Order.findById(orderId).populate('user', 'email');
+
+  if (!order) {
+    return { success: false, orderId, status: 404, message: 'Order not found' };
+  }
+
+  if (!order.user || (requestingUser.role !== 'admin' && order.user._id.toString() !== requestingUser._id.toString())) {
+    return { success: false, orderId, status: 403, message: 'Not authorized to cancel this order' };
+  }
+
+  if (!['Pending', 'Processing'].includes(order.orderStatus)) {
+    return { success: false, orderId, status: 400, message: `Cannot cancel order with status: ${order.orderStatus}` };
+  }
+
+  order.orderStatus = 'Cancelled';
+  order.statusHistory.push({ status: 'Cancelled', changedAt: new Date() });
+
+  for (const item of order.items) {
+    const product = await Product.findById(item.product);
+    if (product) {
+      const inventoryItem = product.inventory.find(inv =>
+        inv.color === item.color && inv.size === item.size
+      );
+      if (inventoryItem) {
+        inventoryItem.stock += item.quantity;
+        product.totalStock += item.quantity;
+        await product.save();
+      }
+    }
+  }
+
+  if (order.pointsUsed > 0 || order.pointsEarned > 0) {
+    const user = await User.findById(order.user._id);
+    if (user) {
+      user.rewardPoints = user.rewardPoints + order.pointsUsed - order.pointsEarned;
+      await user.save();
+    }
+  }
+
+  const cancelledOrder = await order.save();
+
+  if (order.user && order.user.email) {
+    try {
+      await sendOrderStatusUpdateToCustomer(cancelledOrder, order.user.email);
+    } catch (emailError) {
+      console.log('Cancellation email failed, but order was cancelled:', emailError);
+    }
+  }
+
+  return { success: true, orderId, order: cancelledOrder };
+};
+
 const orderController = {
     createOrder: async (req, res) => {
       try {
@@ -278,7 +375,10 @@ getAllOrders: async (req, res) => {
     
     // Filtering
     const filter = {};
-    if (req.query.status) filter.status = req.query.status;
+    // Was filter.status - the schema field is orderStatus, so this never
+    // actually filtered anything. Blocking bug for the admin tabs, which
+    // depend on this query param to scope each tab to one status.
+    if (req.query.status) filter.orderStatus = req.query.status;
     
     // Count total documents for pagination
     const totalOrders = await Order.countDocuments(filter);
@@ -406,12 +506,12 @@ getAllOrders: async (req, res) => {
       });
     }
   },
-  
+
 // Update order status (admin only)
 updateOrderStatus: async (req, res) => {
   try {
     const { orderId } = req.params;
-    const { status } = req.body;
+    const { status, trackingNumber } = req.body;
 
     if (!status) {
       return res.status(400).json({
@@ -420,48 +520,16 @@ updateOrderStatus: async (req, res) => {
       });
     }
 
-    const order = await Order.findById(orderId)
-      .populate('user', 'email');
-    
-    if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: 'Order not found'
-      });
+    const result = await updateSingleOrderStatus(orderId, status, trackingNumber);
+
+    if (!result.success) {
+      return res.status(404).json({ success: false, message: result.message });
     }
-
-    // Update tracking number if provided
-    if (req.body.trackingNumber) {
-      order.trackingNumber = req.body.trackingNumber;
-    }
-
-    // Only send notification if status actually changed
-    const statusChanged = order.orderStatus !== status; // Changed from order.status
-    order.orderStatus = status; // Changed from order.status
-
-    // Issue #18 - append to the timeline on every real transition
-    if (statusChanged) {
-      order.statusHistory.push({ status, changedAt: new Date() });
-    }
-
-    const updatedOrder = await order.save();
-
-    if (statusChanged) {
-      const emailToSend = order.customerEmail || order.user?.email;
-    
-      if (emailToSend) {
-        try {
-          await sendOrderStatusUpdateToCustomer(updatedOrder, emailToSend);
-        } catch (emailError) {
-          console.log('Status update email failed, but order was updated:', emailError);
-        }
-      }
-    }    
 
     return res.status(200).json({
       success: true,
       message: 'Order status updated successfully',
-      order: updatedOrder
+      order: result.order
     });
   } catch (error) {
     console.error('Error updating order status:', error);
@@ -473,87 +541,155 @@ updateOrderStatus: async (req, res) => {
   }
 },
 
+// Bulk status update (admin only) - powers the tabbed dashboard's bulk
+// action bar (bulk Confirm/Cancel/Ship/Deliver). Loops the same
+// per-order logic as the single-order route above rather than a raw
+// updateMany, so every order still gets its own statusHistory push and
+// status-change email.
+bulkUpdateOrderStatus: async (req, res) => {
+  try {
+    const { orderIds, status } = req.body;
+
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'orderIds must be a non-empty array' });
+    }
+    if (!status) {
+      return res.status(400).json({ success: false, message: 'Status is required' });
+    }
+
+    const results = [];
+    for (const orderId of orderIds) {
+      try {
+        // Cancellation has side effects (inventory return, points reversal)
+        // a plain status flip doesn't - route it through the same logic
+        // the single-order cancel route uses, not the generic status setter.
+        const result = status === 'Cancelled'
+          ? await cancelSingleOrder(orderId, req.user)
+          : await updateSingleOrderStatus(orderId, status);
+        results.push({ orderId, success: result.success, message: result.message });
+      } catch (error) {
+        console.error(`Error updating order ${orderId}:`, error);
+        results.push({ orderId, success: false, message: error.message });
+      }
+    }
+
+    return res.status(200).json({ success: true, results });
+  } catch (error) {
+    console.error('Error in bulk status update:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to bulk update order status',
+      error: error.message
+    });
+  }
+},
+
+// Generate a shipping label (admin only) - stub PDF via labelService,
+// uploads through the existing ImageKit utility, auto-advances the order
+// to Processing. Bypasses updateOrderStatus (like cancelOrder does) since
+// this transition carries extra side effects (the label itself) beyond a
+// plain status change.
+generateOrderLabel: async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const order = await Order.findById(orderId).populate('user', 'email');
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const filePath = await generateLabel(order);
+    const uploadResult = await uploadToImageKit(filePath, `shipping-labels/${order._id}`);
+
+    order.shippingLabel = { url: uploadResult.url, generatedAt: new Date() };
+
+    const statusChanged = order.orderStatus !== 'Processing';
+    order.orderStatus = 'Processing';
+    if (statusChanged) {
+      order.statusHistory.push({ status: 'Processing', changedAt: new Date() });
+    }
+
+    const updatedOrder = await order.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Label generated successfully',
+      order: updatedOrder,
+      labelUrl: uploadResult.url
+    });
+  } catch (error) {
+    console.error('Error generating order label:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to generate label',
+      error: error.message
+    });
+  }
+},
+
+// Bulk label generation (admin only) - "Print All Labels". No PDF-merging
+// into one print job; loops the single-label logic and reports per-order
+// success so a partial failure in the batch isn't silently dropped.
+bulkGenerateOrderLabels: async (req, res) => {
+  try {
+    const { orderIds } = req.body;
+
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'orderIds must be a non-empty array' });
+    }
+
+    const results = [];
+    for (const orderId of orderIds) {
+      try {
+        const order = await Order.findById(orderId).populate('user', 'email');
+        if (!order) {
+          results.push({ orderId, success: false, message: 'Order not found' });
+          continue;
+        }
+
+        const filePath = await generateLabel(order);
+        const uploadResult = await uploadToImageKit(filePath, `shipping-labels/${order._id}`);
+
+        order.shippingLabel = { url: uploadResult.url, generatedAt: new Date() };
+        const statusChanged = order.orderStatus !== 'Processing';
+        order.orderStatus = 'Processing';
+        if (statusChanged) {
+          order.statusHistory.push({ status: 'Processing', changedAt: new Date() });
+        }
+        await order.save();
+
+        results.push({ orderId, success: true, url: uploadResult.url });
+      } catch (error) {
+        console.error(`Error generating label for order ${orderId}:`, error);
+        results.push({ orderId, success: false, message: error.message });
+      }
+    }
+
+    return res.status(200).json({ success: true, results });
+  } catch (error) {
+    console.error('Error in bulk label generation:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to bulk generate labels',
+      error: error.message
+    });
+  }
+},
+
 // Cancel an order
 cancelOrder: async (req, res) => {
   try {
     const { orderId } = req.params;
-    
-    const order = await Order.findById(orderId)
-      .populate('user', 'email');
-    
-    if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: 'Order not found'
-      });
-    }
-    
-    // Check if user is authorized to cancel this order
-    // (req.user.isAdmin doesn't exist on User, only role - same dead-check
-    // bug getOrderById had, fixed the same way since this file's already
-    // being touched for the statusHistory push below)
-    if (!order.user || (req.user.role !== 'admin' && order.user._id.toString() !== req.user._id.toString())) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to cancel this order'
-      });
+    const result = await cancelSingleOrder(orderId, req.user);
+
+    if (!result.success) {
+      return res.status(result.status).json({ success: false, message: result.message });
     }
 
-    // Check if order can be cancelled (only if it's pending or processing)
-    if (!['Pending', 'Processing'].includes(order.orderStatus)) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot cancel order with status: ${order.orderStatus}`
-      });
-    }
-
-    // Update order status to cancelled
-    order.orderStatus = 'Cancelled';
-    // Issue #18 - cancelOrder bypasses updateOrderStatus, so it needs its
-    // own push to keep the timeline complete.
-    order.statusHistory.push({ status: 'Cancelled', changedAt: new Date() });
-
-    // Return items to inventory
-    for (const item of order.items) {
-      const product = await Product.findById(item.product);
-      if (product) {
-        // Find the inventory item
-        const inventoryItem = product.inventory.find(inv => 
-          inv.color === item.color && inv.size === item.size
-        );
-        
-        if (inventoryItem) {
-          inventoryItem.stock += item.quantity;
-          product.totalStock += item.quantity;
-          await product.save();
-        }
-      }
-    }
-    
-    // If points were used or earned, adjust user's points
-    if (order.pointsUsed > 0 || order.pointsEarned > 0) {
-      const user = await User.findById(order.user._id);
-      if (user) {
-        user.rewardPoints = user.rewardPoints + order.pointsUsed - order.pointsEarned;
-        await user.save();
-      }
-    }
-    
-    const cancelledOrder = await order.save();
-    
-    // Send cancellation email
-    if (order.user && order.user.email) {
-      try {
-        await sendOrderStatusUpdateToCustomer(cancelledOrder, order.user.email);
-      } catch (emailError) {
-        console.log('Cancellation email failed, but order was cancelled:', emailError);
-      }
-    }
-    
     return res.status(200).json({
       success: true,
       message: 'Order cancelled successfully',
-      order: cancelledOrder
+      order: result.order
     });
   } catch (error) {
     console.error('Error cancelling order:', error);

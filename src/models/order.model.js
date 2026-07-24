@@ -164,6 +164,12 @@ const orderSchema = new mongoose.Schema({
   trackingNumber: {
     type: String
   },
+  // Order management admin session - set by the label-generation endpoint,
+  // which also auto-advances orderStatus to 'Processing'.
+  shippingLabel: {
+    url: String,
+    generatedAt: Date
+  },
   estimatedDelivery: {
     type: Date
   },
