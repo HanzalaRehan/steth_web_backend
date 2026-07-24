@@ -15,6 +15,17 @@ router.post('/google-auth', userController.googleAuthUser);
 // Authenticated user routes
 router.get('/profile', auth, userController.profileAccess);
 router.get('/profile-admin', auth, isAdmin, userController.profileAccessAdmin);
+
+// EXTENSION POINT (issue #22 - Rewards redemption mechanics, pending
+// finalized program rules from the business side - do not build this
+// speculatively). Once rules exist, a redemption endpoint belongs here,
+// e.g.:
+//   router.post('/redeem-points', auth, userController.redeemPoints);
+// It would validate the requested redemption against req.user.rewardPoints
+// (same field the shell already reads-only displays via GET /profile
+// above) and decrement it - mirroring how order.controller.js's
+// createOrder already deducts rewardPoints when points are spent at
+// checkout, rather than inventing a second points-spending code path.
 router.post('/password-update', auth, userController.changePass);
 router.put('/update-account', auth, userController.updateAccount);
 

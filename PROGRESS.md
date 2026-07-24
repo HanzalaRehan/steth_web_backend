@@ -256,3 +256,21 @@ Pipeline: batched client payload → light shape validation → **one** `queue.a
 
 ### What's next
 Provision a Redis instance and a second worker process/service, set `REDIS_URL` in both places, then run a real browsing session end-to-end: confirm events land in the three MongoDB collections via the worker (not written directly by the endpoint), confirm the `steth_sid` cookie round-trips cross-origin with the new CORS `credentials` setting, confirm login/checkout actually link an existing anonymous session to the right customer. Place a real cart with both a verified-student/first-order account and a discount code where each one wins in turn, confirm the order's stored `discount`/`discountCode` fields match the winner. Build the eventual storefront affiliate-attribution flow that populates `Order.affiliateCode` — nothing reads it yet.
+
+---
+
+## Session: Issue #22 — Rewards page shell (2026-07-24)
+
+**Redemption logic is intentionally not built this session.** Your brief explicitly said not to invent redemption mechanics, and to build shell-only if you hadn't given program rules yet — you hadn't, so this is shell-only: read-only display of the two fields that already exist, nothing that spends or awards points beyond what `order.controller.js` already does at checkout.
+
+### No new endpoint needed
+`GET /api/users/profile` (`auth`-gated, `user.controller.js`'s `profileAccess`) already returns the full user document via `.lean()`, which already includes both `rewardPoints` and `firstOrderPlaced` - confirmed by reading the `User` schema and the existing frontend consumers of this same endpoint (`AccountOverlay.jsx`'s Profile tab already displays `rewardPoints` from this exact call). The frontend Rewards page shell reuses this endpoint directly rather than adding a duplicate one.
+
+### Extension point (`src/routes/user.routes.js`)
+Added a clearly-commented placeholder immediately after the `/profile` route, marking where a future `POST /api/users/redeem-points` (or similar) would go once program rules are finalized - explicitly not built now. The comment points out that any real implementation should validate against `req.user.rewardPoints` and decrement it the same way `order.controller.js`'s `createOrder` already does when points are spent at checkout, rather than inventing a second points-spending code path later.
+
+### Verification
+`node --check` on `user.routes.js` - clean. No other backend file was touched this session.
+
+### What's next
+Once program rules exist (earn rate, redemption options, tiers if any - all still TBD per the master plan and your own explicit instruction this session), come back to the extension point in `user.routes.js` and build the real redemption endpoint against it.
