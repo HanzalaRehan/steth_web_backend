@@ -459,8 +459,8 @@ const uploadPicture = async (req, res) => {
 const updateAccount = async (req, res) => {
   try {
     const id = req.user._id;
-    const { username, currentPassword, newPassword } = req.body;
-    
+    const { username, currentPassword, newPassword, address } = req.body;
+
     const user = await User.findById(id);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -516,15 +516,43 @@ const updateAccount = async (req, res) => {
       }
     }
 
+    // Issue #20 - "save this address to my profile" from checkout. Treats
+    // the checkout form's single address+city as one default address, not
+    // an address book entry - replaces the existing default in place
+    // rather than accumulating a near-duplicate every time someone leaves
+    // the checkbox checked.
+    if (address) {
+      const addressDoc = {
+        type: 'home',
+        fullName: address.fullName,
+        addressLine1: address.addressLine1,
+        addressLine2: address.addressLine2 || '',
+        city: address.city,
+        state: 'N/A',
+        postalCode: '00000',
+        country: 'Pakistan',
+        phoneNumber: address.phoneNumber,
+        isDefault: true
+      };
+
+      const existingDefaultIndex = user.addresses.findIndex(a => a.isDefault);
+      if (existingDefaultIndex !== -1) {
+        user.addresses[existingDefaultIndex] = addressDoc;
+      } else {
+        user.addresses.push(addressDoc);
+      }
+    }
+
     // Save the user changes
     await user.save();
-    
-    res.status(200).json({ 
+
+    res.status(200).json({
       message: 'Account updated successfully',
       user: {
         username: user.username,
         email: user.email,
-        profilePicUrl: user.profilePicUrl
+        profilePicUrl: user.profilePicUrl,
+        addresses: user.addresses
       }
     });
   } catch (err) {

@@ -210,6 +210,9 @@ const orderController = {
           paymentMethod,
           isFirstOrder,
           paymentReceipt: receiptData,
+          // Issue #18 - seed the timeline so every new order has a real
+          // history from the start, not just from the first admin update.
+          statusHistory: [{ status: 'Pending', changedAt: new Date() }],
         };
         
         // Add user reference if logged in
@@ -329,15 +332,26 @@ getAllOrders: async (req, res) => {
   getUserOrders: async (req, res) => {
     try {
       const userId = req.user._id;
-      
+
       const orders = await Order.find({ user: userId })
         .populate('items.product', 'name images price')
         .sort({ createdAt: -1 });
-      
+
+      // Issue #18 - orders created before statusHistory existed hydrate as
+      // an empty array; give them a single synthesized entry instead of a
+      // blank timeline.
+      const ordersWithHistory = orders.map(order => {
+        const orderObj = order.toObject();
+        if (!orderObj.statusHistory || orderObj.statusHistory.length === 0) {
+          orderObj.statusHistory = [{ status: orderObj.orderStatus, changedAt: orderObj.createdAt }];
+        }
+        return orderObj;
+      });
+
       return res.status(200).json({
         success: true,
-        count: orders.length,
-        orders
+        count: ordersWithHistory.length,
+        orders: ordersWithHistory
       });
     } catch (error) {
       console.error('Error fetching user orders:', error);
@@ -373,9 +387,15 @@ getAllOrders: async (req, res) => {
         });
       }
 
+      // Issue #18 - same empty-statusHistory fallback as getUserOrders
+      const orderObj = order.toObject();
+      if (!orderObj.statusHistory || orderObj.statusHistory.length === 0) {
+        orderObj.statusHistory = [{ status: orderObj.orderStatus, changedAt: orderObj.createdAt }];
+      }
+
       return res.status(200).json({
         success: true,
-        order
+        order: orderObj
       });
     } catch (error) {
       console.error('Error fetching order:', error);
@@ -418,6 +438,11 @@ updateOrderStatus: async (req, res) => {
     // Only send notification if status actually changed
     const statusChanged = order.orderStatus !== status; // Changed from order.status
     order.orderStatus = status; // Changed from order.status
+
+    // Issue #18 - append to the timeline on every real transition
+    if (statusChanged) {
+      order.statusHistory.push({ status, changedAt: new Date() });
+    }
 
     const updatedOrder = await order.save();
 
@@ -464,7 +489,10 @@ cancelOrder: async (req, res) => {
     }
     
     // Check if user is authorized to cancel this order
-    if (!order.user || (!req.user.isAdmin && order.user._id.toString() !== req.user._id.toString())) {
+    // (req.user.isAdmin doesn't exist on User, only role - same dead-check
+    // bug getOrderById had, fixed the same way since this file's already
+    // being touched for the statusHistory push below)
+    if (!order.user || (req.user.role !== 'admin' && order.user._id.toString() !== req.user._id.toString())) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to cancel this order'
@@ -481,7 +509,10 @@ cancelOrder: async (req, res) => {
 
     // Update order status to cancelled
     order.orderStatus = 'Cancelled';
-    
+    // Issue #18 - cancelOrder bypasses updateOrderStatus, so it needs its
+    // own push to keep the timeline complete.
+    order.statusHistory.push({ status: 'Cancelled', changedAt: new Date() });
+
     // Return items to inventory
     for (const item of order.items) {
       const product = await Product.findById(item.product);

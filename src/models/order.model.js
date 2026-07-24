@@ -142,6 +142,21 @@ const orderSchema = new mongoose.Schema({
     enum: ['Pending', 'Confirmed', 'Processing', 'Shipped', 'Delivered', 'Cancelled'],
     default: 'Pending'
   },
+  // Issue #18 - one entry per transition, pushed in createOrder (initial),
+  // updateOrderStatus, and cancelOrder. Orders created before this field
+  // existed simply hydrate as [] (Mongoose's default array behavior) -
+  // getUserOrders/getOrderById synthesize a single fallback entry from
+  // orderStatus/createdAt for those, no migration script needed.
+  statusHistory: [{
+    status: {
+      type: String,
+      enum: ['Pending', 'Confirmed', 'Processing', 'Shipped', 'Delivered', 'Cancelled']
+    },
+    changedAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
   isFirstOrder: {
     type: Boolean,
     default: false
