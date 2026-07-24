@@ -158,3 +158,28 @@ Added three new, purely additive filter branches — `categoryRef`, `colorRefs`,
 
 ### What's next
 Run a real gift-card purchase → checkout → balance-decrement trip against a real dev/staging DB once one's reachable — same standing ask as every prior session's PROGRESS.md. If gift-card email delivery becomes a real requirement, `emailService.js` will need a generic "send templated email" export first; today's exports are all purpose-built for specific flows (OTP, order confirmation). Blog admin CRUD screen and Affiliate's real request-flow (`AffiliatePartner`/`AffiliateRequest` models) are both still open — the frontend session that triggered this one built a static Affiliate info page only, per your explicit "backend-only, later" instruction.
+
+---
+
+## Session: Checkout/account cluster — issues #18, #20 (2026-07-24)
+
+Confirmed both prerequisites (A1's `updateAccount` fix, A4's cancel-route uncomment + `orderStatus` bugfix) were already done per this file's own earlier entries — no rework needed before starting. Plan mode was used for the `statusHistory` schema change specifically, per your instruction, since it needed an explicit answer on how existing orders without the field would behave.
+
+### `statusHistory` (issue #18) — `order.model.js`, `order.controller.js`
+New `statusHistory: [{status, changedAt}]` array on `Order`, populated in three places:
+- `createOrder` seeds `[{status: 'Pending', changedAt: now}]` on every new order, so the timeline exists from creation, not just from the first admin update.
+- `updateOrderStatus` pushes a new entry whenever the status actually changes (reusing the `statusChanged` boolean already computed there for the email-notification branch).
+- `cancelOrder` pushes its own `{status: 'Cancelled', ...}` entry, since it sets `orderStatus` directly and bypasses `updateOrderStatus` entirely.
+
+**No migration script for existing orders, and this was a deliberate decision, not an oversight.** Mongoose hydrates a newly-added array field as `[]` automatically for documents that predate the schema change — `order.statusHistory` is never `undefined`, just empty. `getUserOrders` and `getOrderById` both check for that empty-array case and synthesize a single fallback entry (`{status: order.orderStatus, changedAt: order.createdAt}`) before responding, so an old order shows "current status since order date" instead of a blank timeline. Kept in the two response-shaping functions rather than a schema virtual, specifically to avoid the side effect of enabling `toJSON:{virtuals:true}` schema-wide, which would also silently surface the existing unused `formattedId` virtual in every order response.
+
+**Incidental fix bundled in**: `cancelOrder`'s `!req.user.isAdmin` check was dead code (`isAdmin` doesn't exist on `User`, only `role`) — flagged in an earlier session's entry above as deferred. It didn't actually block a customer cancelling their own order (the broken clause only mattered for the admin-cancels-someone-else's-order path), but since this function was already being edited for the `statusHistory` push, it got the same `req.user.role === 'admin'` fix `getOrderById` received in an earlier session, for consistency.
+
+### `updateAccount` extended to accept a saved address (issue #20)
+`updateAccount` previously only handled `username`/`currentPassword`/`newPassword` — it had no concept of `User.addresses` at all despite that field already existing on the schema. Extended to accept an optional `address` object from the checkout "save this address to my profile" flow: if the user already has a default address, it's replaced in place; otherwise a new one is pushed with `isDefault: true`. This treats the checkout form's single address+city as one canonical default address, not an address-book entry — deliberately not accumulating a near-duplicate every time someone leaves the checkbox checked, since the checkout form itself only ever collects one address at a time. Response now also echoes `addresses` back (previously only `username`/`email`/`profilePicUrl`).
+
+### Verification
+`node --check` on all three changed files — clean (confirmed earlier in the session; a later re-check attempt hit this machine's own resource contention from several other running apps — VS Code, another AI coding tool, the Claude desktop app itself — timing out on even `wc -l`, unrelated to these files, which hadn't changed since the first successful check). Manually traced all three `statusHistory` push points against the schema's enum and the existing `orderStatus` transitions. Live order-creation → status-walk → cancel round trip wasn't possible from here for the same reason every backend session in this project has hit: this sandbox can't reach the live Atlas cluster, and the real deployed backend doesn't have any of this project's work pushed to it yet.
+
+### What's next
+Once a reachable dev/staging backend exists: place a real order, walk it through `Pending → Confirmed → Processing → Shipped → Delivered` via `PUT /api/orders/update-status/:orderId` (admin token), confirm `statusHistory` grows one entry per transition; confirm `cancelOrder` succeeds while `Pending`/`Processing` and 400s once `Shipped`/`Delivered`; confirm the address-save round trip via `GET /api/users/profile` after a checkout with the box checked.
