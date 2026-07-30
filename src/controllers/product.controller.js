@@ -30,6 +30,8 @@ exports.getAllProducts = catchAsync(async (req, res) => {
     categoryRef,
     colorRefs,
     fabric,
+    size,
+    bestSeller,
     minPrice,
     maxPrice,
     inStock = true,
@@ -52,6 +54,14 @@ exports.getAllProducts = catchAsync(async (req, res) => {
   if (colorRefs) filter.colorRefs = colorRefs; // Mongoose matches array-contains for a single ObjectId
   if (fabric) filter.fabric = fabric;
 
+  // inventory[].size is a free-text, uppercase-normalized string (matches
+  // the write-path normalization in updateInventory below) - $elemMatch
+  // with an in-stock requirement so a size filter never returns a product
+  // that's actually a dead end for that specific size.
+  if (size) filter.inventory = { $elemMatch: { size: size.toUpperCase(), stock: { $gt: 0 } } };
+
+  if (bestSeller === 'true') filter.isBestSeller = true;
+
   if (minPrice || maxPrice) {
     filter.price = {};
     if (minPrice) filter.price.$gte = Number(minPrice);
@@ -66,7 +76,7 @@ exports.getAllProducts = catchAsync(async (req, res) => {
   // version (bumped on any product write, see invalidateProductCaches above).
   const version = await getCacheVersion('products');
   const cacheKey = `cache:products:v${version}:${JSON.stringify({
-    category, gender, color, categoryRef, colorRefs, fabric, minPrice, maxPrice, inStock, sort, page, limit,
+    category, gender, color, categoryRef, colorRefs, fabric, size, bestSeller, minPrice, maxPrice, inStock, sort, page, limit,
   })}`;
 
   const responseBody = await getOrSetCache(cacheKey, 300, async () => {

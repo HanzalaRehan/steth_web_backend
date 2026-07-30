@@ -167,6 +167,16 @@ const productSchema = new Schema({
     isCustomersAlsoBought: {
         type: Boolean,
         default: false
+    },
+    // Admin-curated flag (mirrors isCustomersAlsoBought's shape) - the
+    // Men's/Women's storefront pages show at most 3 of these per gender,
+    // set via a checkbox in ProductAdd/ProductUpdate rather than a
+    // separate dedicated admin screen (unlike Customers Also Bought,
+    // there's no cross-product "which N products" curation UI needed here,
+    // just a per-product on/off toggle).
+    isBestSeller: {
+        type: Boolean,
+        default: false
     }
 }, { timestamps: true });
 
@@ -181,6 +191,7 @@ productSchema.index({ isActive: 1, categoryRef: 1 }); // Part B.1 ref-based cate
 productSchema.index({ isActive: 1, fabric: 1 }); // fabric filter
 productSchema.index({ colorRefs: 1 }); // multikey - array-contains colorRefs filter
 productSchema.index({ isCustomersAlsoBought: 1, isActive: 1 }); // getCustomersAlsoBoughtProducts
+productSchema.index({ isBestSeller: 1, isActive: 1, gender: 1 }); // Men's/Women's best-sellers section
 productSchema.index({ isActive: 1, totalStock: 1 }); // inStock==='true' filter
 
 // Calculate average rating
