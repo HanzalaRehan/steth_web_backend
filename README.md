@@ -89,6 +89,29 @@ NODE_ENV=development
 - `POST /api/student-verification/submit` - Submit verification
 - `GET /api/student-verification/status` - Check status
 
+### Size Recommendation
+- `GET /api/size/chart` - Published scrub top/pants size charts
+- `POST /api/size/recommend` - "What's My Size?" (public; saves the result if a token is sent)
+- `POST /api/size/quiz` - "Take the Size Quiz" (auth; same answer + one-time reward points)
+- `GET /api/size/profile` - Saved size, ordered-size history and feedback count (auth)
+- `POST /api/size/fit-feedback` - Report how a size fitted / a wrong-size exchange (auth)
+
+Both entry points run the same rule-based engine (`src/utils/sizeRecommendation.js`),
+which sizes against the published chart (`src/utils/sizeChart.js`) and returns a
+**single size for the whole outfit** - where the chest and waist disagree, the larger
+size wins and the response explains why.
+
+Accepted inputs (all optional, but at least `chest`, `waist`, or `height + weight` is
+required): `chest`, `waist`, `hip`, `heightInches`, `weightKg`, `fitPreference`
+(`regular` | `loose`). A `loose` preference recommends one size up, capped at XL, and
+the response always reports both `baseSize` (what the measurements said) and
+`recommendedSize` (what the customer is told), so the UI can show the reason.
+
+Every submission and every piece of fit feedback is stored on the customer's
+`SizeProfile`. That is deliberate: the rules are a cold-start stand-in, and the
+collected data is the training set for the model that will replace them. When it
+lands, only `recommendSize()` changes - the response shape is the contract.
+
 ## File Storage
 
 This project uses **ImageKit** for file storage and image management. All images (product images, user profile pictures, student verification documents, etc.) are uploaded to ImageKit with organized folder structures:
