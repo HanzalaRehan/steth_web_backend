@@ -1,0 +1,443 @@
+/**
+ * Author(s): 1. Zainab Raza
+ * Description: The loyalty programme engine. Owns every way points are
+ *              credited, and is the only module that writes to the reward
+ *              ledger. Controllers call it; it never touches req/res, so it
+ *              can be unit tested and reused (the size quiz grants its reward
+ *              through awardRule, not by touching rewardPoints itself).
+ *
+ *              Two ways a rule pays out:
+ *
+ *                Claimed  - the customer taps "I follow you on Instagram".
+ *                           Social follows cannot be verified without
+ *                           platform APIs, so these are trust-based and
+ *                           strictly one-time (see rewardRules.js).
+ *
+ *                Derived  - computed from data we already hold. syncDerived-
+ *                           Rewards() re-derives every purchase milestone,
+ *                           birthday, anniversary and review reward from the
+ *                           orders/products/user documents themselves.
+ *
+ *              Why derived rather than event-driven: the sync pass is
+ *              idempotent and stateless, so it can run any time (when the
+ *              customer opens the rewards page, after checkout, from a cron
+ *              if one is ever added) and always converges on the same answer.
+ *              That means no scheduler, no queue and no Redis are needed for
+ *              the programme to be correct, and orders placed before this
+ *              feature existed are credited retroactively the first time a
+ *              customer opens the page - no backfill migration.
+ *
+ *              Double-crediting is prevented by the unique index on the
+ *              ledger, not by checking first and writing after - see
+ *              rewardTransaction.model.js. awardRule() inserts and treats a
+ *              duplicate-key error as "already earned", so concurrent calls
+ *              cannot both pay out.
+ *
+ *              Key functions:
+ *                - awardRule           : idempotent single award
+ *                - claimRule           : self-declared rules + their opt-in side effects
+ *                - syncDerivedRewards  : re-derive everything data-driven
+ *                - getRewardsSummary   : balance, per-rule status, history
+ *
+ * Date created: August 3rd, 2026
+ * Edit(s):
+ *   (1): None
+ * Date last modified: August 3rd, 2026
+ * Run: Not directly runnable - imported by src/controllers/rewards.controller.js
+ */
+
+const mongoose = require('mongoose');
+const RewardTransaction = require('../models/rewardTransaction.model');
+const User = require('../models/user.model');
+const Order = require('../models/order.model');
+const Product = require('../models/product.model');
+const {
+    CADENCE,
+    TRIGGER,
+    REWARD_RULES,
+    getRule,
+    listRules
+} = require('../config/rewardRules');
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+// Cancelled orders never count toward any milestone. Everything else does,
+// matching how order.controller.js already credits its per-order points at
+// creation time rather than waiting for delivery.
+const MILESTONE_ORDER_FILTER = { orderStatus: { $ne: 'Cancelled' } };
+
+/**
+ * The occurrence key for a rule, given its cadence. See the ledger model for
+ * why this shape matters.
+ * @param {Object} rule - Rule definition from the catalogue.
+ * @param {String} [explicit] - Caller-supplied key, required for REPEATABLE.
+ * @param {Date} [when] - Date the award relates to (ANNUAL rules).
+ * @returns {String} The occurrence key.
+ */
+const buildOccurrenceKey = (rule, explicit, when = new Date()) => {
+    if (rule.cadence === CADENCE.ANNUAL) return String(when.getFullYear());
+    if (rule.cadence === CADENCE.REPEATABLE) return String(explicit);
+    return 'once';
+};
+
+/**
+ * Credits a rule to a customer exactly once per occurrence.
+ *
+ * The ledger insert comes first and is the gate: if the unique index rejects
+ * it, the customer already has this award and the balance is left alone. Only
+ * a successful insert increments User.rewardPoints, so the balance can never
+ * be credited twice for one occurrence.
+ *
+ * @param {ObjectId|String} userId - Customer earning the points.
+ * @param {String} ruleKey - Key from the rule catalogue.
+ * @param {Object} [options]
+ * @param {String} [options.occurrenceKey] - Required for REPEATABLE rules.
+ * @param {Date} [options.when] - Date the award relates to (ANNUAL rules).
+ * @param {Object} [options.meta] - Order/product/admin context for the ledger.
+ * @returns {Promise<Object>} { awarded, alreadyEarned, points, ruleKey, occurrenceKey }
+ * @throws {Error} If the rule key is not in the catalogue.
+ */
+const awardRule = async (userId, ruleKey, options = {}) => {
+    const rule = getRule(ruleKey);
+    if (!rule) throw new Error(`Unknown reward rule: ${ruleKey}`);
+
+    if (rule.cadence === CADENCE.REPEATABLE && !options.occurrenceKey) {
+        throw new Error(`Rule ${ruleKey} is repeatable and requires an occurrenceKey`);
+    }
+
+    const occurrenceKey = buildOccurrenceKey(rule, options.occurrenceKey, options.when);
+    const points = rule.points;
+
+    try {
+        await RewardTransaction.create({
+            user: userId,
+            ruleKey,
+            occurrenceKey,
+            points,
+            type: 'earn',
+            description: rule.label,
+            meta: options.meta || {},
+            awardedAt: options.when || new Date()
+        });
+    } catch (error) {
+        // The unique index did its job - this occurrence is already paid.
+        if (error && error.code === RewardTransaction.DUPLICATE_KEY_ERROR) {
+            return { awarded: false, alreadyEarned: true, points: 0, ruleKey, occurrenceKey };
+        }
+        throw error;
+    }
+
+    // Ledger row exists, so the balance must follow. If this update were to
+    // fail the row would be orphaned, so we undo it rather than leave the
+    // customer with history they were never paid for. (This codebase runs no
+    // transactions anywhere - see the note in order.controller.js createOrder
+    // - so compensating here matches the existing pattern.)
+    try {
+        await User.findByIdAndUpdate(userId, { $inc: { rewardPoints: points } });
+    } catch (error) {
+        await RewardTransaction.deleteOne({ user: userId, ruleKey, occurrenceKey });
+        throw error;
+    }
+
+    return { awarded: true, alreadyEarned: false, points, ruleKey, occurrenceKey };
+};
+
+/**
+ * Handles the rules a customer claims themselves, applying the opt-in side
+ * effect that goes with them before the points are credited.
+ *
+ * @param {ObjectId|String} userId - Customer claiming.
+ * @param {String} ruleKey - Key from the catalogue.
+ * @param {Object} [payload] - { whatsappNumber } for the WhatsApp opt-in.
+ * @returns {Promise<Object>} awardRule's result.
+ * @throws {Error} If the rule is unknown, not self-claimable, or the payload
+ *                 is missing something the rule requires.
+ */
+const claimRule = async (userId, ruleKey, payload = {}) => {
+    const rule = getRule(ruleKey);
+    if (!rule) throw new Error(`Unknown reward rule: ${ruleKey}`);
+
+    if (rule.trigger !== TRIGGER.SELF_DECLARED) {
+        throw new Error(`${ruleKey} is awarded automatically and cannot be claimed directly.`);
+    }
+
+    // Record the consent before paying for it, so we never hand out points
+    // for an opt-in we failed to store.
+    if (ruleKey === 'SUBSCRIBE_WHATSAPP') {
+        const whatsappNumber = (payload.whatsappNumber || '').trim();
+        if (!whatsappNumber) {
+            throw new Error('A WhatsApp number is required to subscribe.');
+        }
+        await User.findByIdAndUpdate(userId, {
+            $set: { 'marketingOptIns.whatsapp': true, 'marketingOptIns.whatsappNumber': whatsappNumber }
+        });
+    }
+
+    if (ruleKey === 'SUBSCRIBE_EMAIL') {
+        await User.findByIdAndUpdate(userId, { $set: { 'marketingOptIns.email': true } });
+    }
+
+    return awardRule(userId, ruleKey, {});
+};
+
+/**
+ * Every non-cancelled order for a customer, oldest first. The single read
+ * that all five purchase milestones are derived from.
+ * @param {ObjectId|String} userId - Customer.
+ * @returns {Promise<Array>} Lean order docs with just the fields needed.
+ */
+const getMilestoneOrders = (userId) =>
+    Order.find({ user: userId, ...MILESTONE_ORDER_FILTER })
+        .select('_id total createdAt')
+        .sort({ createdAt: 1 })
+        .lean();
+
+/**
+ * Purchase milestones, all derived from order history.
+ * @param {ObjectId|String} userId - Customer.
+ * @returns {Promise<Array<Object>>} Results of each award attempted.
+ */
+const evaluatePurchaseRules = async (userId) => {
+    const orders = await getMilestoneOrders(userId);
+    const results = [];
+
+    if (!orders.length) return results;
+
+    // Place Your 2nd Order.
+    if (orders.length >= 2) {
+        results.push(await awardRule(userId, 'SECOND_ORDER', {
+            meta: { order: orders[1]._id },
+            when: orders[1].createdAt
+        }));
+
+        // ...and the faster variant. Stacks with the rule above by design:
+        // the reference programme lists them as two separate rewards.
+        const gapDays = (new Date(orders[1].createdAt) - new Date(orders[0].createdAt)) / MS_PER_DAY;
+        if (gapDays <= REWARD_RULES.SECOND_ORDER_FAST.windowDays) {
+            results.push(await awardRule(userId, 'SECOND_ORDER_FAST', {
+                meta: { order: orders[1]._id },
+                when: orders[1].createdAt
+            }));
+        }
+    }
+
+    // A single order at or above the high-value threshold, once ever.
+    const bigOrder = orders.find((order) => order.total >= REWARD_RULES.HIGH_VALUE_ORDER.thresholdPkr);
+    if (bigOrder) {
+        results.push(await awardRule(userId, 'HIGH_VALUE_ORDER', {
+            meta: { order: bigOrder._id },
+            when: bigOrder.createdAt
+        }));
+    }
+
+    // N orders inside any rolling window, not per calendar year - a customer
+    // who orders across a year boundary still qualifies. Sliding window over
+    // the date-sorted list.
+    const { orderCount, windowDays } = REWARD_RULES.ORDER_COUNT_MILESTONE;
+    for (let i = 0; i + orderCount - 1 < orders.length; i += 1) {
+        const first = new Date(orders[i].createdAt);
+        const last = new Date(orders[i + orderCount - 1].createdAt);
+        if ((last - first) / MS_PER_DAY <= windowDays) {
+            results.push(await awardRule(userId, 'ORDER_COUNT_MILESTONE', {
+                meta: { order: orders[i + orderCount - 1]._id },
+                when: last
+            }));
+            break;
+        }
+    }
+
+    // Every Nth qualifying purchase. Each payout is its own occurrence, keyed
+    // by the milestone number, so a customer on their 9th qualifying order has
+    // three separate ledger rows and re-running sync adds nothing.
+    const { thresholdPkr, interval } = REWARD_RULES.RECURRING_PURCHASE;
+    const qualifying = orders.filter((order) => order.total >= thresholdPkr);
+    const payouts = Math.floor(qualifying.length / interval);
+    for (let milestone = 1; milestone <= payouts; milestone += 1) {
+        const triggeringOrder = qualifying[milestone * interval - 1];
+        results.push(await awardRule(userId, 'RECURRING_PURCHASE', {
+            occurrenceKey: String(milestone),
+            meta: { order: triggeringOrder._id },
+            when: triggeringOrder.createdAt
+        }));
+    }
+
+    return results;
+};
+
+/**
+ * Birthday and signup-anniversary rewards. Both are annual and only pay once
+ * the date has actually passed this year, so nobody is paid in advance.
+ * @param {Object} user - The user document.
+ * @returns {Promise<Array<Object>>} Results of each award attempted.
+ */
+const evaluateCelebrationRules = async (user) => {
+    const results = [];
+    const now = new Date();
+    const year = now.getFullYear();
+
+    if (user.dateOfBirth) {
+        const birthday = new Date(user.dateOfBirth);
+        const thisYearsBirthday = new Date(year, birthday.getMonth(), birthday.getDate());
+        if (thisYearsBirthday <= now) {
+            results.push(await awardRule(user._id, 'BIRTHDAY', { when: thisYearsBirthday }));
+        }
+    }
+
+    // Anniversary of joining. Skips the signup year itself - the first
+    // anniversary is a year after joining, not the day you joined.
+    if (user.createdAt) {
+        const joined = new Date(user.createdAt);
+        const thisYearsAnniversary = new Date(year, joined.getMonth(), joined.getDate());
+        if (year > joined.getFullYear() && thisYearsAnniversary <= now) {
+            results.push(await awardRule(user._id, 'LOYALTY_ANNIVERSARY', { when: thisYearsAnniversary }));
+        }
+    }
+
+    return results;
+};
+
+/**
+ * One award per product the customer has written a review for.
+ *
+ * Derived from the embedded Product.ratings array, which is where reviews
+ * live in this codebase. Nothing writes to that array yet, so this pays out
+ * as soon as a review endpoint lands - no change needed here.
+ *
+ * @param {ObjectId|String} userId - Customer.
+ * @returns {Promise<Array<Object>>} Results of each award attempted.
+ */
+const evaluateReviewRules = async (userId) => {
+    const reviewed = await Product.find(
+        { ratings: { $elemMatch: { userId, review: { $exists: true, $ne: '' } } } }
+    ).select('_id').lean();
+
+    const results = [];
+    for (const product of reviewed) {
+        results.push(await awardRule(userId, 'PRODUCT_REVIEW', {
+            occurrenceKey: String(product._id),
+            meta: { product: product._id }
+        }));
+    }
+    return results;
+};
+
+/**
+ * Re-derives every data-driven reward for a customer and credits whatever is
+ * newly qualified. Safe to call as often as you like - repeat runs award
+ * nothing because each occurrence is already in the ledger.
+ *
+ * @param {ObjectId|String} userId - Customer.
+ * @returns {Promise<Object>} { newlyAwarded: [...], pointsAwarded: Number }
+ */
+const syncDerivedRewards = async (userId) => {
+    const user = await User.findById(userId).select('_id dateOfBirth createdAt');
+    if (!user) throw new Error('User not found');
+
+    const results = [
+        ...await evaluatePurchaseRules(userId),
+        ...await evaluateCelebrationRules(user),
+        ...await evaluateReviewRules(userId)
+    ];
+
+    const newlyAwarded = results.filter((result) => result.awarded);
+
+    return {
+        newlyAwarded,
+        pointsAwarded: newlyAwarded.reduce((sum, result) => sum + result.points, 0)
+    };
+};
+
+/**
+ * Everything the rewards page needs: the balance, the catalogue annotated
+ * with what this customer has already earned, and recent history.
+ *
+ * Runs a sync first so the page never shows a stale "not earned yet" for a
+ * milestone the customer already hit.
+ *
+ * @param {ObjectId|String} userId - Customer.
+ * @param {Object} [options]
+ * @param {Number} [options.historyLimit=25] - How many ledger rows to return.
+ * @returns {Promise<Object>} Balance, per-rule status, history and totals.
+ */
+const getRewardsSummary = async (userId, options = {}) => {
+    const historyLimit = options.historyLimit || 25;
+
+    const sync = await syncDerivedRewards(userId);
+
+    const [user, transactions] = await Promise.all([
+        User.findById(userId).select('rewardPoints dateOfBirth marketingOptIns'),
+        RewardTransaction.find({ user: userId }).sort({ awardedAt: -1 }).lean()
+    ]);
+
+    // Count earned occurrences per rule so the page can show "claimed" on
+    // one-time rules and "earned 3 times" on repeatable ones.
+    const earnedByRule = transactions.reduce((acc, tx) => {
+        acc[tx.ruleKey] = acc[tx.ruleKey] || { count: 0, points: 0, lastAwardedAt: null };
+        acc[tx.ruleKey].count += 1;
+        acc[tx.ruleKey].points += tx.points;
+        if (!acc[tx.ruleKey].lastAwardedAt || tx.awardedAt > acc[tx.ruleKey].lastAwardedAt) {
+            acc[tx.ruleKey].lastAwardedAt = tx.awardedAt;
+        }
+        return acc;
+    }, {});
+
+    const rules = listRules().map((rule) => {
+        const earned = earnedByRule[rule.key];
+        const thisYear = String(new Date().getFullYear());
+
+        // "Can they earn this right now?" - one-time rules are spent once,
+        // annual rules reset each year, repeatable rules always stay open.
+        let available = true;
+        if (rule.cadence === CADENCE.ONCE) {
+            available = !earned;
+        } else if (rule.cadence === CADENCE.ANNUAL) {
+            available = !transactions.some((tx) => tx.ruleKey === rule.key && tx.occurrenceKey === thisYear);
+        }
+
+        return {
+            key: rule.key,
+            label: rule.label,
+            description: rule.description,
+            points: rule.points,
+            cadence: rule.cadence,
+            trigger: rule.trigger,
+            category: rule.category,
+            claimable: rule.trigger === TRIGGER.SELF_DECLARED && available,
+            available,
+            timesEarned: earned ? earned.count : 0,
+            pointsEarned: earned ? earned.points : 0,
+            lastAwardedAt: earned ? earned.lastAwardedAt : null,
+            // Lets the page prompt for what is missing rather than showing a
+            // reward the customer can never actually earn.
+            blockedBy: rule.requiresDateOfBirth && !user.dateOfBirth ? 'dateOfBirth' : null
+        };
+    });
+
+    return {
+        balance: user.rewardPoints,
+        lifetimeEarned: transactions
+            .filter((tx) => tx.type === 'earn')
+            .reduce((sum, tx) => sum + tx.points, 0),
+        justAwarded: sync.newlyAwarded,
+        pointsJustAwarded: sync.pointsAwarded,
+        rules,
+        history: transactions.slice(0, historyLimit).map((tx) => ({
+            ruleKey: tx.ruleKey,
+            description: tx.description,
+            points: tx.points,
+            type: tx.type,
+            awardedAt: tx.awardedAt
+        }))
+    };
+};
+
+module.exports = {
+    awardRule,
+    claimRule,
+    syncDerivedRewards,
+    getRewardsSummary,
+    evaluatePurchaseRules,
+    evaluateCelebrationRules,
+    evaluateReviewRules,
+    buildOccurrenceKey
+};
