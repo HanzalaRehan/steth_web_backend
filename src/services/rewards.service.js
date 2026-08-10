@@ -61,6 +61,18 @@ const {
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
+// The whole no-double-crediting guarantee rests on the ledger's unique index
+// existing. Mongoose builds indexes asynchronously after the model is
+// registered, so on a cold start a request can arrive before the build has
+// finished - and every award in that window would be a silent duplicate.
+// Model.init() resolves once the indexes are actually in place; the promise is
+// cached, so this is a one-time wait on the first award and free thereafter.
+let ledgerIndexesReady = null;
+const ensureLedgerIndexes = () => {
+    if (!ledgerIndexesReady) ledgerIndexesReady = RewardTransaction.init();
+    return ledgerIndexesReady;
+};
+
 // Cancelled orders never count toward any milestone. Everything else does,
 // matching how order.controller.js already credits its per-order points at
 // creation time rather than waiting for delivery.
@@ -107,6 +119,9 @@ const awardRule = async (userId, ruleKey, options = {}) => {
 
     const occurrenceKey = buildOccurrenceKey(rule, options.occurrenceKey, options.when);
     const points = rule.points;
+
+    // Never insert before the uniqueness guarantee is actually enforceable.
+    await ensureLedgerIndexes();
 
     try {
         await RewardTransaction.create({
