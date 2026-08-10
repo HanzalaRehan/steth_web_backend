@@ -112,6 +112,33 @@ Every submission and every piece of fit feedback is stored on the customer's
 collected data is the training set for the model that will replace them. When it
 lands, only `recommendSize()` changes - the response shape is the contract.
 
+### Loyalty Programme (Rewards)
+- `GET /api/rewards/catalogue` - Public list of every way to earn points
+- `GET /api/rewards/me` - Balance, per-rule status and history (auth)
+- `POST /api/rewards/claim` - Claim a self-declared reward (auth)
+- `POST /api/rewards/sync` - Re-derive purchase/celebration rewards (auth)
+- `POST /api/rewards/birthday` - Save a date of birth (auth)
+- `GET /api/rewards/config` - Values in force + pending decisions (admin)
+
+**All point values and PKR thresholds live in `src/config/rewardRules.js` and are
+provisional** - they are carried over from the reference programme pending business
+sign-off. That file is the only place to change them; nothing else hardcodes a value.
+
+Rules pay out in one of two ways:
+- **Claimed** - social follows and subscriptions. These cannot be verified without
+  platform APIs, so they are trust-based and strictly one-time.
+- **Derived** - purchase milestones, birthday, loyalty anniversary and product
+  reviews, all recomputed from orders/products/user data by `POST /sync` (which
+  `GET /me` also runs). The sync is idempotent and stateless, so **no cron, queue or
+  Redis is required**, and customers are credited retroactively for orders placed
+  before the programme launched - no backfill migration needed.
+
+Double-crediting is prevented by a unique index on
+`(user, ruleKey, occurrenceKey)` in `src/models/rewardTransaction.model.js`, not by
+check-then-write, so concurrent requests cannot both pay out. `User.rewardPoints`
+remains the authoritative spendable balance that checkout reads; the ledger records
+how it got there.
+
 ## File Storage
 
 This project uses **ImageKit** for file storage and image management. All images (product images, user profile pictures, student verification documents, etc.) are uploaded to ImageKit with organized folder structures:
