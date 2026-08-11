@@ -133,6 +133,22 @@ Rules pay out in one of two ways:
   Redis is required**, and customers are credited retroactively for orders placed
   before the programme launched - no backfill migration needed.
 
+**Joining** pays a one-off `SIGN_UP` reward. It is derived from the account's own
+creation date rather than granted by the registration controller, so customers who
+signed up before the programme launched are credited the first time they open the
+rewards page — no backfill script, and registration is untouched.
+
+**Points expire** after `POINTS_EXPIRY_DAYS` (currently 365). The expiry date is
+stamped on each ledger row at award time, so changing the policy later never moves
+the goalposts on points already earned. Expired points are swept lazily during the
+same sync — no scheduled job — and the sweep writes an `adjust` row so the history
+explains the drop. The balance is never driven negative.
+
+The activity feed merges two sources: programme rewards from the ledger, and
+per-order points, which `order.controller.js` credits straight to the balance. Order
+points are read for display only and deliberately **not** written into the ledger —
+doing so would double-credit a balance checkout has already updated.
+
 Double-crediting is prevented by a unique index on
 `(user, ruleKey, occurrenceKey)` in `src/models/rewardTransaction.model.js`, not by
 check-then-write, so concurrent requests cannot both pay out. `User.rewardPoints`
