@@ -30,10 +30,19 @@ const { buildOccurrenceKey } = require('../../services/rewards.service');
 
 describe('reward rule catalogue', () => {
     it('covers every reward in the programme brief', () => {
-        // The 14 rewards signed off for launch. "Join All-Access" is
-        // deliberately excluded - it needs a membership product first.
-        expect(listRules()).toHaveLength(14);
+        // The 14 rewards signed off for launch, plus the sign-up bonus the
+        // rewards page pays on joining. "Join All-Access" is deliberately
+        // excluded - it needs a membership product first.
+        expect(listRules()).toHaveLength(15);
+        expect(getRule('SIGN_UP').points).toBe(200);
         expect(getRule('JOIN_ALL_ACCESS')).toBeNull();
+    });
+
+    it('pays the sign-up bonus automatically rather than by claim', () => {
+        // Derived from the account's creation date, so customers who joined
+        // before the programme launched are credited too.
+        expect(getRule('SIGN_UP').trigger).toBe(TRIGGER.DERIVED);
+        expect(getRule('SIGN_UP').cadence).toBe(CADENCE.ONCE);
     });
 
     it('uses WhatsApp rather than SMS for the messaging opt-in', () => {
