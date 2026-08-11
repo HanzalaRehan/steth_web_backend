@@ -55,6 +55,7 @@ const {
     CADENCE,
     TRIGGER,
     REWARD_RULES,
+    POINTS_EXPIRY_DAYS,
     getRule,
     listRules
 } = require('../config/rewardRules');
@@ -119,6 +120,11 @@ const awardRule = async (userId, ruleKey, options = {}) => {
 
     const occurrenceKey = buildOccurrenceKey(rule, options.occurrenceKey, options.when);
     const points = rule.points;
+    const awardedAt = options.when || new Date();
+
+    // Stamped from the policy in force right now, so a later change to
+    // POINTS_EXPIRY_DAYS never moves the expiry of points already earned.
+    const expiresAt = new Date(awardedAt.getTime() + POINTS_EXPIRY_DAYS * MS_PER_DAY);
 
     // Never insert before the uniqueness guarantee is actually enforceable.
     await ensureLedgerIndexes();
@@ -132,7 +138,8 @@ const awardRule = async (userId, ruleKey, options = {}) => {
             type: 'earn',
             description: rule.label,
             meta: options.meta || {},
-            awardedAt: options.when || new Date()
+            awardedAt,
+            expiresAt
         });
     } catch (error) {
         // The unique index did its job - this occurrence is already paid.
@@ -280,6 +287,77 @@ const evaluatePurchaseRules = async (userId) => {
 };
 
 /**
+ * The one-off joining reward. Derived from the account's creation date rather
+ * than granted at registration, which means customers who signed up before
+ * the programme existed are credited the first time they open the rewards
+ * page - and the registration controller stays untouched.
+ * @param {Object} user - The user document.
+ * @returns {Promise<Array<Object>>} Result of the award attempt.
+ */
+const evaluateSignUpRule = async (user) => [
+    await awardRule(user._id, 'SIGN_UP', { when: user.createdAt || new Date() })
+];
+
+/**
+ * Claws back points whose expiry date has passed.
+ *
+ * Runs lazily as part of the sync rather than on a schedule, so it needs no
+ * cron or queue: any customer who looks at their balance gets an accurate
+ * one, and a customer who never looks cannot spend expired points either,
+ * because checkout reads the balance this sweep maintains.
+ *
+ * Each swept batch is marked with expiredAt so it can never be deducted
+ * twice, and a matching 'adjust' row is written so the history explains the
+ * drop rather than the balance silently falling.
+ *
+ * @param {ObjectId|String} userId - Customer.
+ * @returns {Promise<Object>} { pointsExpired, batches }
+ */
+const expireStalePoints = async (userId) => {
+    const now = new Date();
+
+    const stale = await RewardTransaction.find({
+        user: userId,
+        type: 'earn',
+        expiredAt: null,
+        expiresAt: { $ne: null, $lte: now }
+    });
+
+    if (!stale.length) return { pointsExpired: 0, batches: 0 };
+
+    const pointsExpired = stale.reduce((sum, tx) => sum + tx.points, 0);
+
+    // Mark first: if the balance update below fails, the next sweep will not
+    // double-deduct, and the worst case is points that outlive their expiry.
+    // The opposite ordering risks charging a customer twice for one batch.
+    await RewardTransaction.updateMany(
+        { _id: { $in: stale.map((tx) => tx._id) } },
+        { $set: { expiredAt: now } }
+    );
+
+    // Never drive the balance negative - points may already have been spent
+    // at checkout, in which case there is nothing left to expire.
+    const user = await User.findById(userId).select('rewardPoints');
+    const deduction = Math.min(pointsExpired, user ? user.rewardPoints : 0);
+
+    if (deduction > 0) {
+        await User.findByIdAndUpdate(userId, { $inc: { rewardPoints: -deduction } });
+        await RewardTransaction.create({
+            user: userId,
+            ruleKey: 'POINTS_EXPIRED',
+            occurrenceKey: `expiry-${now.toISOString()}`,
+            points: -deduction,
+            type: 'adjust',
+            description: 'Points expired',
+            awardedAt: now,
+            expiresAt: null
+        });
+    }
+
+    return { pointsExpired: deduction, batches: stale.length };
+};
+
+/**
  * Birthday and signup-anniversary rewards. Both are annual and only pay once
  * the date has actually passed this year, so nobody is paid in advance.
  * @param {Object} user - The user document.
@@ -349,16 +427,23 @@ const syncDerivedRewards = async (userId) => {
     if (!user) throw new Error('User not found');
 
     const results = [
+        ...await evaluateSignUpRule(user),
         ...await evaluatePurchaseRules(userId),
         ...await evaluateCelebrationRules(user),
         ...await evaluateReviewRules(userId)
     ];
 
+    // Sweep last, so points that were awarded and expired in the same pass
+    // (possible for a customer returning after more than a year) settle
+    // correctly rather than expiring before they are credited.
+    const expiry = await expireStalePoints(userId);
+
     const newlyAwarded = results.filter((result) => result.awarded);
 
     return {
         newlyAwarded,
-        pointsAwarded: newlyAwarded.reduce((sum, result) => sum + result.points, 0)
+        pointsAwarded: newlyAwarded.reduce((sum, result) => sum + result.points, 0),
+        pointsExpired: expiry.pointsExpired
     };
 };
 
@@ -379,9 +464,16 @@ const getRewardsSummary = async (userId, options = {}) => {
 
     const sync = await syncDerivedRewards(userId);
 
-    const [user, transactions] = await Promise.all([
-        User.findById(userId).select('rewardPoints dateOfBirth marketingOptIns'),
-        RewardTransaction.find({ user: userId }).sort({ awardedAt: -1 }).lean()
+    const [user, transactions, pointsEarningOrders] = await Promise.all([
+        User.findById(userId).select('rewardPoints dateOfBirth marketingOptIns username'),
+        RewardTransaction.find({ user: userId }).sort({ awardedAt: -1 }).lean(),
+        // Points earned per order are credited by order.controller.js straight
+        // to the balance and were never ledger rows. They are read here purely
+        // so the activity table is complete - deliberately NOT written into the
+        // ledger, which would double-credit a balance checkout already updated.
+        Order.find({ user: userId, pointsEarned: { $gt: 0 }, ...MILESTONE_ORDER_FILTER })
+            .select('orderId pointsEarned createdAt')
+            .lean()
     ]);
 
     // Count earned occurrences per rule so the page can show "claimed" on
@@ -428,21 +520,51 @@ const getRewardsSummary = async (userId, options = {}) => {
         };
     });
 
+    // One activity feed from two sources: programme rewards (the ledger) and
+    // per-order earnings (the orders themselves), merged newest-first.
+    const ledgerActivity = transactions.map((tx) => ({
+        ruleKey: tx.ruleKey,
+        description: tx.description,
+        points: tx.points,
+        type: tx.type,
+        awardedAt: tx.awardedAt,
+        expiresAt: tx.expiresAt || null,
+        expired: Boolean(tx.expiredAt)
+    }));
+
+    const orderActivity = pointsEarningOrders.map((order) => ({
+        ruleKey: 'ORDER_POINTS',
+        description: order.orderId ? `Order ${order.orderId}` : 'Order',
+        points: order.pointsEarned,
+        type: 'earn',
+        awardedAt: order.createdAt,
+        expiresAt: new Date(new Date(order.createdAt).getTime() + POINTS_EXPIRY_DAYS * MS_PER_DAY),
+        expired: false
+    }));
+
+    const history = [...ledgerActivity, ...orderActivity]
+        .sort((a, b) => new Date(b.awardedAt) - new Date(a.awardedAt));
+
+    // The headline "your points expire on" date: the soonest expiry still
+    // ahead of us among points that have not already been swept.
+    const upcomingExpiries = history
+        .filter((entry) => entry.type === 'earn' && !entry.expired && entry.expiresAt)
+        .map((entry) => new Date(entry.expiresAt))
+        .filter((date) => date > new Date())
+        .sort((a, b) => a - b);
+
     return {
+        username: user.username,
         balance: user.rewardPoints,
-        lifetimeEarned: transactions
-            .filter((tx) => tx.type === 'earn')
-            .reduce((sum, tx) => sum + tx.points, 0),
+        lifetimeEarned: history
+            .filter((entry) => entry.type === 'earn')
+            .reduce((sum, entry) => sum + entry.points, 0),
+        nextExpiryDate: upcomingExpiries.length ? upcomingExpiries[0] : null,
         justAwarded: sync.newlyAwarded,
         pointsJustAwarded: sync.pointsAwarded,
+        pointsJustExpired: sync.pointsExpired,
         rules,
-        history: transactions.slice(0, historyLimit).map((tx) => ({
-            ruleKey: tx.ruleKey,
-            description: tx.description,
-            points: tx.points,
-            type: tx.type,
-            awardedAt: tx.awardedAt
-        }))
+        history: history.slice(0, historyLimit)
     };
 };
 
@@ -454,5 +576,7 @@ module.exports = {
     evaluatePurchaseRules,
     evaluateCelebrationRules,
     evaluateReviewRules,
+    evaluateSignUpRule,
+    expireStalePoints,
     buildOccurrenceKey
 };
