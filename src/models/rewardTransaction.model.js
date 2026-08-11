@@ -91,6 +91,21 @@ const rewardTransactionSchema = new Schema({
     awardedAt: {
         type: Date,
         default: Date.now
+    },
+    // When these points stop being spendable. Stamped at award time from the
+    // expiry period in force then, so changing the policy later never
+    // retroactively moves the goalposts on points already earned. Null on
+    // 'redeem'/'adjust' rows, which do not themselves expire.
+    expiresAt: {
+        type: Date,
+        default: null
+    },
+    // Set once the expiry sweep has clawed these points back, so the same
+    // batch is never deducted twice. The sweep is lazy (it runs during the
+    // rewards sync) rather than a scheduled job - no cron or queue needed.
+    expiredAt: {
+        type: Date,
+        default: null
     }
 }, { timestamps: true });
 
@@ -104,6 +119,10 @@ rewardTransactionSchema.index(
 
 // Backs the history feed on the rewards page (newest first).
 rewardTransactionSchema.index({ user: 1, awardedAt: -1 });
+
+// Backs the expiry sweep: "this customer's earn rows that are past their
+// expiry and have not been swept yet".
+rewardTransactionSchema.index({ user: 1, type: 1, expiredAt: 1, expiresAt: 1 });
 
 // Exposed so the service can recognise the duplicate-key error by code
 // without importing driver internals.
