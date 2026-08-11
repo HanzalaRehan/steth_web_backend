@@ -72,6 +72,12 @@ const RECURRING_PURCHASE_THRESHOLD_PKR = 21000; // reference: $75+ per purchase
 // How many qualifying purchases between each recurring bonus payout.
 const RECURRING_PURCHASE_INTERVAL = 3;        // reference: every 3rd purchase
 
+// How long earned points stay spendable. Shown on the rewards page against
+// every activity row and as the headline "expires on" date. PLACEHOLDER -
+// one year matches the reference programme, but the business has not signed
+// off on an expiry policy for us yet.
+const POINTS_EXPIRY_DAYS = 365;
+
 // Window for the "second order quickly" bonus, and the size/period of the
 // order-count milestone.
 const SECOND_ORDER_WINDOW_DAYS = 30;
@@ -84,6 +90,22 @@ const ORDER_COUNT_WINDOW_DAYS = 365;
  * treat them as permanent.
  */
 const REWARD_RULES = {
+    // --- Joining --------------------------------------------------------
+    // Paid once for having an account at all. Derived from the account's own
+    // creation date rather than granted by the registration controller, so
+    // every customer who signed up before the programme launched is credited
+    // the first time they open the rewards page - no backfill script, and
+    // registration keeps working exactly as it does today.
+    SIGN_UP: {
+        key: 'SIGN_UP',
+        label: 'Sign Up',
+        description: 'Create an account and start earning points.',
+        points: 200,
+        cadence: CADENCE.ONCE,
+        trigger: TRIGGER.DERIVED,
+        category: CATEGORY.ENGAGEMENT
+    },
+
     // --- Engagement: opt-ins and social follows -------------------------
     SUBSCRIBE_EMAIL: {
         key: 'SUBSCRIBE_EMAIL',
@@ -246,6 +268,7 @@ const PENDING_BUSINESS_SIGN_OFF = [
     'All point values below are provisional, carried over from the reference programme.',
     `HIGH_VALUE_ORDER threshold: PKR ${ORDER_VALUE_THRESHOLD_PKR} (placeholder for the $200 tier).`,
     `RECURRING_PURCHASE threshold: PKR ${RECURRING_PURCHASE_THRESHOLD_PKR} (placeholder for the $75 tier).`,
+    `Points expiry: ${POINTS_EXPIRY_DAYS} days after earning (placeholder - no expiry policy signed off yet).`,
     'Redemption rate (points -> PKR off an order) is not defined here - see issue #22.'
 ];
 
@@ -276,6 +299,7 @@ module.exports = {
     PENDING_BUSINESS_SIGN_OFF,
     ORDER_VALUE_THRESHOLD_PKR,
     RECURRING_PURCHASE_THRESHOLD_PKR,
+    POINTS_EXPIRY_DAYS,
     RECURRING_PURCHASE_INTERVAL,
     SECOND_ORDER_WINDOW_DAYS,
     ORDER_COUNT_MILESTONE,
