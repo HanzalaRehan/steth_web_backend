@@ -52,6 +52,7 @@ const User = require('../models/user.model');
 const Order = require('../models/order.model');
 const Product = require('../models/product.model');
 const Subscriber = require('../models/Subscriber');
+const emailService = require('../utils/emailService');
 const {
     CADENCE,
     TRIGGER,
@@ -206,11 +207,26 @@ const claimRule = async (userId, ruleKey, payload = {}) => {
         // Upsert rather than insert - the same person may have subscribed
         // through the newsletter footer already, and that must not fail the
         // claim or create a duplicate.
-        await Subscriber.updateOne(
+        const subscription = await Subscriber.updateOne(
             { email: user.email },
             { $setOnInsert: { email: user.email, createdAt: new Date() } },
             { upsert: true }
         );
+
+        // Match what the newsletter footer does, so it doesn't matter which
+        // route a customer subscribed through. Only on a genuinely new
+        // subscriber - someone already on the list should not be welcomed
+        // again just because they claimed the reward later.
+        if (subscription.upsertedCount > 0) {
+            try {
+                await emailService.sendWelcomeEmail(user.email);
+            } catch (error) {
+                // Never fail the claim over the welcome email. They are on the
+                // list either way, and the points are already theirs; a mail
+                // outage must not cost them the reward.
+                console.error('Rewards: welcome email failed for', user.email, '-', error.message);
+            }
+        }
 
         await User.findByIdAndUpdate(userId, { $set: { 'marketingOptIns.email': true } });
     }
