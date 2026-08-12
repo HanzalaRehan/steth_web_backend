@@ -72,6 +72,21 @@ const RECURRING_PURCHASE_THRESHOLD_PKR = 21000; // reference: $75+ per purchase
 // How many qualifying purchases between each recurring bonus payout.
 const RECURRING_PURCHASE_INTERVAL = 3;        // reference: every 3rd purchase
 
+// Where each social reward sends the customer before it pays out. The card
+// opens this, so the customer is actually taken to the page they're being paid
+// to follow rather than collecting points for a click that did nothing.
+//
+// We still cannot verify the follow itself - no platform exposes that without
+// per-user OAuth - so the reward stays trust-based and strictly one-time. What
+// this fixes is the action, not the verification.
+//
+// !! PLACEHOLDER HANDLES - swap for Steth's real accounts before launch !!
+const SOCIAL_URLS = {
+    facebook: 'https://www.facebook.com/stethofficial',
+    instagram: 'https://www.instagram.com/stethofficial',
+    tiktok: 'https://www.tiktok.com/@stethofficial'
+};
+
 // How long earned points stay spendable. Shown on the rewards page against
 // every activity row and as the headline "expires on" date. PLACEHOLDER -
 // one year matches the reference programme, but the business has not signed
@@ -136,7 +151,8 @@ const REWARD_RULES = {
         points: 10,
         cadence: CADENCE.ONCE,
         trigger: TRIGGER.SELF_DECLARED,
-        category: CATEGORY.ENGAGEMENT
+        category: CATEGORY.ENGAGEMENT,
+        actionUrl: SOCIAL_URLS.facebook
     },
     FOLLOW_INSTAGRAM: {
         key: 'FOLLOW_INSTAGRAM',
@@ -145,7 +161,8 @@ const REWARD_RULES = {
         points: 10,
         cadence: CADENCE.ONCE,
         trigger: TRIGGER.SELF_DECLARED,
-        category: CATEGORY.ENGAGEMENT
+        category: CATEGORY.ENGAGEMENT,
+        actionUrl: SOCIAL_URLS.instagram
     },
     FOLLOW_TIKTOK: {
         key: 'FOLLOW_TIKTOK',
@@ -154,7 +171,8 @@ const REWARD_RULES = {
         points: 10,
         cadence: CADENCE.ONCE,
         trigger: TRIGGER.SELF_DECLARED,
-        category: CATEGORY.ENGAGEMENT
+        category: CATEGORY.ENGAGEMENT,
+        actionUrl: SOCIAL_URLS.tiktok
     },
     // Granted by the size feature when a customer completes the size quiz -
     // the quiz owns the interaction, the rewards service owns the points.
@@ -269,6 +287,7 @@ const PENDING_BUSINESS_SIGN_OFF = [
     `HIGH_VALUE_ORDER threshold: PKR ${ORDER_VALUE_THRESHOLD_PKR} (placeholder for the $200 tier).`,
     `RECURRING_PURCHASE threshold: PKR ${RECURRING_PURCHASE_THRESHOLD_PKR} (placeholder for the $75 tier).`,
     `Points expiry: ${POINTS_EXPIRY_DAYS} days after earning (placeholder - no expiry policy signed off yet).`,
+    'Social profile URLs are placeholder handles - replace with Steth\'s real accounts before launch.',
     'Redemption rate (points -> PKR off an order) is not defined here - see issue #22.'
 ];
 

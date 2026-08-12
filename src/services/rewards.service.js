@@ -51,6 +51,7 @@ const RewardTransaction = require('../models/rewardTransaction.model');
 const User = require('../models/user.model');
 const Order = require('../models/order.model');
 const Product = require('../models/product.model');
+const Subscriber = require('../models/Subscriber');
 const {
     CADENCE,
     TRIGGER,
@@ -196,6 +197,21 @@ const claimRule = async (userId, ruleKey, payload = {}) => {
     }
 
     if (ruleKey === 'SUBSCRIBE_EMAIL') {
+        const user = await User.findById(userId).select('email');
+        if (!user) throw new Error('User not found');
+
+        // Actually subscribe them. The opt-in flag on the user is not enough:
+        // send-bulk-email reads the Subscriber collection, so a customer paid
+        // for subscribing would never have received anything without this.
+        // Upsert rather than insert - the same person may have subscribed
+        // through the newsletter footer already, and that must not fail the
+        // claim or create a duplicate.
+        await Subscriber.updateOne(
+            { email: user.email },
+            { $setOnInsert: { email: user.email, createdAt: new Date() } },
+            { upsert: true }
+        );
+
         await User.findByIdAndUpdate(userId, { $set: { 'marketingOptIns.email': true } });
     }
 
@@ -516,7 +532,9 @@ const getRewardsSummary = async (userId, options = {}) => {
             lastAwardedAt: earned ? earned.lastAwardedAt : null,
             // Lets the page prompt for what is missing rather than showing a
             // reward the customer can never actually earn.
-            blockedBy: rule.requiresDateOfBirth && !user.dateOfBirth ? 'dateOfBirth' : null
+            blockedBy: rule.requiresDateOfBirth && !user.dateOfBirth ? 'dateOfBirth' : null,
+            // Where the card sends the customer before it pays out.
+            actionUrl: rule.actionUrl || null
         };
     });
 

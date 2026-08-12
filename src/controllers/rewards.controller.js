@@ -54,7 +54,9 @@ exports.getCatalogue = catchAsync(async (req, res) => {
                 points: rule.points,
                 cadence: rule.cadence,
                 category: rule.category,
-                claimable: rule.trigger === 'self-declared'
+                claimable: rule.trigger === 'self-declared',
+                // Where the card should send the customer before it pays out.
+                actionUrl: rule.actionUrl || null
             }))
         }
     });
