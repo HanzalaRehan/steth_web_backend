@@ -58,6 +58,7 @@ const {
     TRIGGER,
     REWARD_RULES,
     POINTS_EXPIRY_DAYS,
+    POINT_VALUE_PKR,
     getRule,
     listRules
 } = require('../config/rewardRules');
@@ -592,6 +593,10 @@ const getRewardsSummary = async (userId, options = {}) => {
     return {
         username: user.username,
         balance: user.rewardPoints,
+        // What the balance is actually worth to spend, so the page can show a
+        // value rather than a bare point count.
+        pointValuePkr: POINT_VALUE_PKR,
+        balanceValuePkr: user.rewardPoints * POINT_VALUE_PKR,
         lifetimeEarned: history
             .filter((entry) => entry.type === 'earn')
             .reduce((sum, entry) => sum + entry.points, 0),

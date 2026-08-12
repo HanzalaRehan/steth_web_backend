@@ -87,6 +87,13 @@ const SOCIAL_URLS = {
     tiktok: 'https://www.tiktok.com/@stethofficial'
 };
 
+// What one point is worth when spent at checkout. This is NOT a new decision:
+// discount.controller.js already applies `pointsDiscount = pointsToUse` (1 point
+// = 1 PKR) and the storefront advertises that rate today. It is declared here so
+// the rewards page can show customers what their balance is actually worth
+// instead of a bare number - if the rate ever changes, both must move together.
+const POINT_VALUE_PKR = 1;
+
 // How long earned points stay spendable. Shown on the rewards page against
 // every activity row and as the headline "expires on" date. PLACEHOLDER -
 // one year matches the reference programme, but the business has not signed
@@ -325,6 +332,7 @@ module.exports = {
     ORDER_VALUE_THRESHOLD_PKR,
     RECURRING_PURCHASE_THRESHOLD_PKR,
     POINTS_EXPIRY_DAYS,
+    POINT_VALUE_PKR,
     RECURRING_PURCHASE_INTERVAL,
     SECOND_ORDER_WINDOW_DAYS,
     ORDER_COUNT_MILESTONE,
