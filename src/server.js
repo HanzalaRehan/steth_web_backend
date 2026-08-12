@@ -14,6 +14,7 @@
  *   (1): Mounted the size recommendation routes at /api/size for the
  *        "What's My Size?" and size quiz feature.
  *   (2): Mounted the loyalty programme routes at /api/rewards.
+ *   (3): Mounted the customer support agent routes at /api/support.
  * Date last modified: August 3rd, 2026
  * Run: npm run dev   (development)  |  npm start   (production)
  */
@@ -54,6 +55,7 @@ const discountCodeRoutes = require('./routes/discountCode.routes');
 const affiliateRoutes = require('./routes/affiliate.routes');
 const sizeRoutes = require('./routes/size.routes');
 const rewardsRoutes = require('./routes/rewards.routes');
+const supportAgentRoutes = require('./routes/supportAgent.routes');
 
 const app = express();
 
@@ -155,6 +157,7 @@ app.use('/api/discount-codes', discountCodeRoutes);
 app.use('/api/affiliates', affiliateRoutes);
 app.use('/api/size', sizeRoutes);
 app.use('/api/rewards', rewardsRoutes);
+app.use('/api/support', supportAgentRoutes);
 
 // Enhanced error handling middleware for file uploads
 app.use((error, req, res, next) => {

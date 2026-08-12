@@ -312,6 +312,105 @@ const SUPPORT_TOOLS = [
     },
 
     {
+        name: 'prepare_order',
+        description:
+            'Prepare an order the customer has described, and get back a checkout link for them to confirm and pay. Call this once you know the product, colour, size and quantity for everything they want. Always read the summary back to them before sending the link.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                items: {
+                    type: 'array',
+                    description: 'Everything the customer wants to buy.',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            productId: { type: 'string', description: 'Product id from search_products.' },
+                            colour: { type: 'string', description: 'Colour name.' },
+                            size: { type: 'string', description: 'Size letter: S, M, L or XL.' },
+                            quantity: { type: 'integer', description: 'How many. Defaults to 1.' }
+                        },
+                        required: ['productId', 'colour', 'size']
+                    }
+                }
+            },
+            required: ['items']
+        },
+        handler: async (input, context) => {
+            const requested = Array.isArray(input.items) ? input.items : [];
+            if (!requested.length) return { prepared: false, message: 'No items were given.' };
+
+            const lines = [];
+            const problems = [];
+
+            // Price and stock are resolved server-side from the catalogue. The
+            // model never supplies a price - if it could, a customer could talk
+            // the agent into a discount that checkout would then honour.
+            for (const item of requested) {
+                const product = await Product.findById(item.productId);
+                if (!product) {
+                    problems.push(`No product with id ${item.productId}.`);
+                    continue;
+                }
+
+                const quantity = Math.max(Number(item.quantity) || 1, 1);
+                const row = (product.inventory || []).find(
+                    (entry) => entry.color === item.colour && entry.size === item.size
+                );
+
+                if (!row || row.stock < quantity) {
+                    problems.push(`${product.name} in ${item.colour}/${item.size} is not available in that quantity.`);
+                    continue;
+                }
+
+                const unitPrice = product.discount
+                    ? Math.round(product.price - (product.price * product.discount) / 100)
+                    : product.price;
+
+                lines.push({
+                    productId: String(product._id),
+                    product: product.name,
+                    colour: item.colour,
+                    size: item.size,
+                    quantity,
+                    unitPrice,
+                    lineTotal: unitPrice * quantity
+                });
+            }
+
+            if (!lines.length) {
+                return { prepared: false, problems, message: 'Nothing on this order is available.' };
+            }
+
+            const subtotal = lines.reduce((sum, line) => sum + line.lineTotal, 0);
+
+            // Deliberately a checkout hand-off, not a direct write. Placing the
+            // order itself runs discounts, gift cards, reward points, stock
+            // decrements and the confirmation email (order.controller.js
+            // createOrder); reproducing that here would drift from checkout and
+            // eventually take a customer's money on the wrong terms. The agent
+            // does the hard part - working out what they want and proving it is
+            // in stock at a real price - and the existing, tested checkout
+            // takes the payment.
+            const base = process.env.FRONTEND_URL || 'http://localhost:3000';
+            const draft = lines.map((l) => `${l.productId}:${l.colour}:${l.size}:${l.quantity}`).join(',');
+            const checkoutUrl = `${base}/cart?draft=${encodeURIComponent(draft)}`;
+
+            return {
+                prepared: true,
+                items: lines,
+                subtotal,
+                currency: 'PKR',
+                // Named so the model reads it back rather than treating the
+                // order as already placed.
+                note: 'This is a draft. The order is only placed once the customer completes checkout.',
+                problems: problems.length ? problems : undefined,
+                checkoutUrl,
+                identified: Boolean(context.userId)
+            };
+        }
+    },
+
+    {
         name: 'escalate_to_human',
         description:
             'Hand the conversation to a human agent. Call this when the customer asks for a person, is distressed, raises a payment or refund dispute, or asks for something no other tool covers. Say that you are handing over before calling it.',
