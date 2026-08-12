@@ -549,8 +549,10 @@ const getRewardsSummary = async (userId, options = {}) => {
             // Lets the page prompt for what is missing rather than showing a
             // reward the customer can never actually earn.
             blockedBy: rule.requiresDateOfBirth && !user.dateOfBirth ? 'dateOfBirth' : null,
-            // Where the card sends the customer before it pays out.
-            actionUrl: rule.actionUrl || null
+            // Where the card sends the customer before it pays out:
+            // actionUrl leaves the site, actionPath stays inside it.
+            actionUrl: rule.actionUrl || null,
+            actionPath: rule.actionPath || null
         };
     });
 

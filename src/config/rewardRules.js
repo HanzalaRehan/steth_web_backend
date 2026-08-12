@@ -183,7 +183,13 @@ const REWARD_RULES = {
         points: 100,
         cadence: CADENCE.ONCE,
         trigger: TRIGGER.INTEGRATION,
-        category: CATEGORY.ENGAGEMENT
+        category: CATEGORY.ENGAGEMENT,
+        // An internal route rather than an external URL: the card sends the
+        // customer to the quiz, and the quiz itself grants the reward. Once
+        // earned the card goes inert like any other one-time reward - but the
+        // quiz stays open, and "What's my size?" on a product page is
+        // unlimited either way, because neither pays out twice.
+        actionPath: '/size-quiz'
     },
     // Repeatable, but keyed per product so a customer earns once for each
     // product they review rather than farming one product over and over.
