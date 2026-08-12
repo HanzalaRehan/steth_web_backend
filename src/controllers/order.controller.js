@@ -1011,6 +1011,12 @@ getOrderStats: async (req, res) => {
     }
   }
   
-};  
+};
+
+// Exposed so the customer support agent can cancel an order through exactly
+// the same path as the HTTP route - cancellation restores stock, refunds
+// reward points and invalidates the product cache, and duplicating that in
+// the agent would eventually drift from this implementation.
+orderController.cancelSingleOrder = cancelSingleOrder;
 
 module.exports = orderController;
