@@ -335,7 +335,13 @@ const SUPPORT_TOOLS = [
             });
             return {
                 escalated: true,
-                message: 'A human agent has been notified and will pick this up.'
+                // Worded carefully: this records the handover, it does not
+                // page anyone. Saying "notified" made the agent promise
+                // callbacks "within the hour" in testing - a commitment
+                // nothing in this system can keep. Until a helpdesk is wired
+                // up, the tool must not imply one exists.
+                message:
+                    'The conversation has been flagged for a human agent. Do not promise the customer a callback time.'
             };
         }
     }
