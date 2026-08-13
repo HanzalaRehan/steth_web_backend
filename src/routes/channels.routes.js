@@ -18,12 +18,17 @@
 const express = require('express');
 const router = express.Router();
 const whatsappController = require('../controllers/whatsapp.controller');
+const instagramController = require('../controllers/instagram.controller');
 
 // Meta's subscription handshake, then the message firehose.
 router.get('/whatsapp/webhook', whatsappController.verifyWebhook);
 router.post('/whatsapp/webhook', whatsappController.receiveWebhook);
 
-// Diagnostics - reports whether the channel is configured, never any secret.
+router.get('/instagram/webhook', instagramController.verifyWebhook);
+router.post('/instagram/webhook', instagramController.receiveWebhook);
+
+// Diagnostics - reports whether each channel is configured, never any secret.
 router.get('/whatsapp/status', whatsappController.status);
+router.get('/instagram/status', instagramController.status);
 
 module.exports = router;
