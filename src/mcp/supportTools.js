@@ -48,6 +48,70 @@ const { bumpCacheVersion } = require('../utils/cache');
 const invalidateProductCaches = () => bumpCacheVersion('products');
 
 /**
+ * Matches what a customer called a colour or size against what the product
+ * actually stocks.
+ *
+ * Exact string comparison is wrong here: a customer asks for "navy blue" and
+ * the catalogue says "Navy", so the row is never found and the agent tells
+ * them an in-stock item is sold out. Matching is case-insensitive, ignores
+ * surrounding whitespace, and accepts either string containing the other, so
+ * "navy blue", "NAVY" and " navy " all reach "Navy".
+ *
+ * @param {String} wanted - What the customer said.
+ * @param {Array<String>} options - What the product actually has.
+ * @returns {String|null} The catalogue's own spelling, or null if no match.
+ */
+const matchOption = (wanted, options) => {
+    const norm = (value) => String(value || '').trim().toLowerCase();
+    const target = norm(wanted);
+    if (!target) return null;
+
+    const exact = options.find((option) => norm(option) === target);
+    if (exact) return exact;
+
+    // "navy blue" -> "Navy", and "m" -> "M".
+    return (
+        options.find((option) => {
+            const candidate = norm(option);
+            return candidate.includes(target) || target.includes(candidate);
+        }) || null
+    );
+};
+
+/**
+ * Resolves a customer's colour and size wording to a real inventory row.
+ *
+ * Distinguishes "we do not make that" from "we make it but it is sold out" -
+ * conflating the two is what produced a false out-of-stock answer.
+ *
+ * @param {Object} product - Product document.
+ * @param {String} colour - Customer's colour wording.
+ * @param {String} size - Customer's size wording.
+ * @returns {Object} { row, colour, size, reason, availableColours, availableSizes }
+ */
+const resolveVariant = (product, colour, size) => {
+    const inventory = product.inventory || [];
+    const availableColours = [...new Set(inventory.map((entry) => entry.color).filter(Boolean))];
+    const availableSizes = [...new Set(inventory.map((entry) => entry.size).filter(Boolean))];
+
+    const resolvedColour = matchOption(colour, availableColours);
+    if (!resolvedColour) {
+        return { row: null, reason: 'unknown-colour', availableColours, availableSizes };
+    }
+
+    const sizesForColour = inventory
+        .filter((entry) => entry.color === resolvedColour)
+        .map((entry) => entry.size);
+    const resolvedSize = matchOption(size, sizesForColour);
+    if (!resolvedSize) {
+        return { row: null, reason: 'unknown-size', colour: resolvedColour, availableColours, availableSizes: sizesForColour };
+    }
+
+    const row = inventory.find((entry) => entry.color === resolvedColour && entry.size === resolvedSize);
+    return { row, colour: resolvedColour, size: resolvedSize, reason: null, availableColours, availableSizes };
+};
+
+/**
  * A fingerprint of exactly what was quoted to the customer.
  *
  * Placing an order is the one irreversible thing this agent can do, and a
@@ -227,19 +291,38 @@ const SUPPORT_TOOLS = [
             const product = await Product.findById(input.productId);
             if (!product) return { found: false, message: 'No product with that id.' };
 
-            const row = (product.inventory || []).find(
-                (entry) => entry.color === input.colour && entry.size === input.size
-            );
+            const match = resolveVariant(product, input.colour, input.size);
+
+            // "We do not make that" is a different answer from "it is sold
+            // out", and saying the wrong one loses a sale. Return what we do
+            // have so the agent can offer it.
+            if (!match.row) {
+                return {
+                    found: true,
+                    product: product.name,
+                    inStock: false,
+                    availability:
+                        match.reason === 'unknown-colour'
+                            ? 'we do not stock that colour'
+                            : 'we do not stock that size in that colour',
+                    availableColours: match.availableColours,
+                    availableSizes: match.availableSizes,
+                    message:
+                        'This is NOT out of stock - we simply do not have that combination. Offer the customer what is listed here.'
+                };
+            }
 
             return {
                 found: true,
                 product: product.name,
-                colour: input.colour,
-                size: input.size,
-                inStock: Boolean(row && row.stock > 0),
+                // Echo the catalogue's own spelling, so the agent answers with
+                // "Navy" even when the customer said "navy blue".
+                colour: match.colour,
+                size: match.size,
+                inStock: match.row.stock > 0,
                 // Exact counts are deliberately not returned - the agent should
                 // say "in stock", not quote warehouse numbers to a customer.
-                availability: row && row.stock > 0 ? 'in stock' : 'out of stock'
+                availability: match.row.stock > 0 ? 'in stock' : 'out of stock'
             };
         }
     },
@@ -425,14 +508,19 @@ const SUPPORT_TOOLS = [
                 }
 
                 const quantity = Math.max(Number(item.quantity) || 1, 1);
-                const row = (product.inventory || []).find(
-                    (entry) => entry.color === item.colour && entry.size === item.size
-                );
+                const match = resolveVariant(product, item.colour, item.size);
 
-                if (!row || row.stock < quantity) {
-                    problems.push(`${product.name} in ${item.colour}/${item.size} is not available in that quantity.`);
+                if (!match.row) {
+                    problems.push(
+                        `${product.name} is not made in ${item.colour}/${item.size}. Available colours: ${match.availableColours.join(', ')}.`
+                    );
                     continue;
                 }
+                if (match.row.stock < quantity) {
+                    problems.push(`${product.name} in ${match.colour}/${match.size} is sold out in that quantity.`);
+                    continue;
+                }
+                const row = match.row;
 
                 const { price: unitPrice } = getCurrentPrice(product);
 
@@ -579,17 +667,23 @@ const SUPPORT_TOOLS = [
                 if (!product) return { placed: false, message: `Product ${wanted.productId} no longer exists.` };
 
                 const quantity = Math.max(Number(wanted.quantity) || 1, 1);
-                const row = (product.inventory || []).find(
-                    (entry) => entry.color === wanted.colour && entry.size === wanted.size
-                );
+                const match = resolveVariant(product, wanted.colour, wanted.size);
 
-                if (!row || row.stock < quantity) {
+                if (!match.row) {
+                    return {
+                        placed: false,
+                        reason: 'unknown-variant',
+                        message: `${product.name} is not made in ${wanted.colour}/${wanted.size}. Available colours: ${match.availableColours.join(', ')}. Nothing has been ordered.`
+                    };
+                }
+                if (match.row.stock < quantity) {
                     return {
                         placed: false,
                         reason: 'out-of-stock',
-                        message: `${product.name} in ${wanted.colour}/${wanted.size} is no longer available in that quantity. Nothing has been ordered.`
+                        message: `${product.name} in ${match.colour}/${match.size} is no longer available in that quantity. Nothing has been ordered.`
                     };
                 }
+                const row = match.row;
 
                 const { price } = getCurrentPrice(product);
                 processed.push({ product, row, quantity, price });
