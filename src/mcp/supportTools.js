@@ -47,22 +47,55 @@ const rewardsService = require('../services/rewards.service');
 const CUSTOMER_CANCELLABLE = ['Pending', 'Confirmed'];
 
 /**
+ * What a product actually costs right now, in PKR.
+ *
+ * `discount` on a product is an object - { percentage, validUntil } - not a
+ * number, so arithmetic straight off `product.discount` yields NaN and the
+ * agent quotes "NaN" at the customer. An expired discount is ignored, so the
+ * agent never quotes a price checkout would refuse to honour.
+ *
+ * @param {Object} product - Product document.
+ * @returns {Object} { price, wasPrice, discountPercentage } - wasPrice is null
+ *                   when nothing is discounted.
+ */
+const getCurrentPrice = (product) => {
+    const percentage = Number(product.discount?.percentage) || 0;
+    const validUntil = product.discount?.validUntil;
+    const live = percentage > 0 && (!validUntil || new Date(validUntil) > new Date());
+
+    if (!live) return { price: product.price, wasPrice: null, discountPercentage: 0 };
+
+    return {
+        price: Math.round(product.price - (product.price * percentage) / 100),
+        wasPrice: product.price,
+        discountPercentage: percentage
+    };
+};
+
+/**
  * Trims a product document down to what a support conversation needs. Sending
  * whole documents would bury the model in inventory rows and image metadata.
  * @param {Object} product - Product document (lean or hydrated).
  * @returns {Object} Compact product summary.
  */
-const summariseProduct = (product) => ({
-    id: String(product._id),
-    name: product.name,
-    price: product.price,
-    discount: product.discount || 0,
-    gender: product.gender,
-    category: product.category,
-    colors: (product.colors || []).map((colour) => colour.name).filter(Boolean),
-    sizes: (product.sizes || []).filter((size) => size.isAvailable !== false).map((size) => size.name),
-    averageRating: product.averageRating || 0
-});
+const summariseProduct = (product) => {
+    const pricing = getCurrentPrice(product);
+    return {
+        id: String(product._id),
+        name: product.name,
+        // The price the customer pays, so the model never has to do the
+        // discount arithmetic itself.
+        price: pricing.price,
+        wasPrice: pricing.wasPrice,
+        discountPercentage: pricing.discountPercentage,
+        currency: 'PKR',
+        gender: product.gender,
+        category: product.category,
+        colors: (product.colors || []).map((colour) => colour.name).filter(Boolean),
+        sizes: (product.sizes || []).filter((size) => size.isAvailable !== false).map((size) => size.name),
+        averageRating: product.averageRating || 0
+    };
+};
 
 /**
  * Order summary shaped for a support reply - status, timeline and what was
@@ -362,9 +395,7 @@ const SUPPORT_TOOLS = [
                     continue;
                 }
 
-                const unitPrice = product.discount
-                    ? Math.round(product.price - (product.price * product.discount) / 100)
-                    : product.price;
+                const { price: unitPrice } = getCurrentPrice(product);
 
                 lines.push({
                     productId: String(product._id),
