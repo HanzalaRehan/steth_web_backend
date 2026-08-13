@@ -69,13 +69,86 @@ const matchOption = (wanted, options) => {
     const exact = options.find((option) => norm(option) === target);
     if (exact) return exact;
 
-    // "navy blue" -> "Navy", and "m" -> "M".
-    return (
-        options.find((option) => {
-            const candidate = norm(option);
-            return candidate.includes(target) || target.includes(candidate);
-        }) || null
-    );
+    // Size words spelled out. Handled explicitly because sizes are single
+    // letters, and "small" happens to contain both "s" and "l" - substring
+    // matching would resolve it to whichever of S or L the product listed
+    // first.
+    const SIZE_WORDS = {
+        small: 's', medium: 'm', large: 'l',
+        'extra large': 'xl', 'extra-large': 'xl', xlarge: 'xl', 'x large': 'xl'
+    };
+    if (SIZE_WORDS[target]) {
+        const bySizeWord = options.find((option) => norm(option) === SIZE_WORDS[target]);
+        if (bySizeWord) return bySizeWord;
+    }
+
+    // "navy blue" -> "Navy". Skipped for one-character options, where
+    // containment is meaningless and dangerous.
+    const contained = options.find((option) => {
+        const candidate = norm(option);
+        if (candidate.length < 2) return false;
+        return candidate.includes(target) || target.includes(candidate);
+    });
+    if (contained) return contained;
+
+    // Plurals both ways - "navys"/"navy", "sets"/"set".
+    const stem = target.endsWith('s') ? target.slice(0, -1) : `${target}s`;
+    const plural = options.find((option) => norm(option) === stem);
+    if (plural) return plural;
+
+    // Finally, typos: "navvy", "nvy", "tael". People type badly, especially on
+    // a phone, and a misspelt colour must not read as "we do not stock that".
+    // Tolerance scales with word length so short names cannot collapse into
+    // each other - "S" must never fuzzy-match "M".
+    let best = null;
+    let bestDistance = Infinity;
+
+    for (const option of options) {
+        const candidate = norm(option);
+        const tolerance = Math.floor(Math.min(candidate.length, target.length) / 3);
+        if (tolerance < 1) continue;
+
+        const distance = editDistance(candidate, target);
+        if (distance <= tolerance && distance < bestDistance) {
+            best = option;
+            bestDistance = distance;
+        }
+    }
+
+    return best;
+};
+
+/**
+ * Damerau-Levenshtein distance - edits between two strings, counting a swap of
+ * two adjacent characters as one edit rather than two.
+ *
+ * That transposition case is the reason this is not plain Levenshtein:
+ * "tael" for "teal" is the single commonest way people mistype a word, and
+ * plain Levenshtein scores it 2, far enough to be rejected as a non-match.
+ *
+ * @param {String} a - First string.
+ * @param {String} b - Second string.
+ * @returns {Number} Edit distance.
+ */
+const editDistance = (a, b) => {
+    const rows = a.length + 1;
+    const cols = b.length + 1;
+    const grid = Array.from({ length: rows }, () => Array(cols).fill(0));
+
+    for (let i = 0; i < rows; i += 1) grid[i][0] = i;
+    for (let j = 0; j < cols; j += 1) grid[0][j] = j;
+
+    for (let i = 1; i < rows; i += 1) {
+        for (let j = 1; j < cols; j += 1) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            grid[i][j] = Math.min(grid[i - 1][j] + 1, grid[i][j - 1] + 1, grid[i - 1][j - 1] + cost);
+
+            if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+                grid[i][j] = Math.min(grid[i][j], grid[i - 2][j - 2] + cost);
+            }
+        }
+    }
+    return grid[rows - 1][cols - 1];
 };
 
 /**
