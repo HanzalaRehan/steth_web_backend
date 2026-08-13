@@ -252,18 +252,45 @@ const SUPPORT_TOOLS = [
         inputSchema: {
             type: 'object',
             properties: {
-                query: { type: 'string', description: 'Free text to match against product name and description.' },
+                query: { type: 'string', description: 'Free text - matches product name, description, category and colour. Pass the customer\'s own words, including a colour if they mentioned one.' },
                 gender: { type: 'string', description: 'Filter by gender, e.g. "Women" or "Men".' },
                 limit: { type: 'integer', description: 'Maximum products to return. Defaults to 5, capped at 20.' }
             }
         },
         handler: async (input) => {
-            const filter = {};
+            // Only ever surface products the storefront would sell.
+            const filter = { isActive: { $ne: false } };
+
             if (input.query) {
-                filter.$or = [
-                    { name: { $regex: input.query, $options: 'i' } },
-                    { description: { $regex: input.query, $options: 'i' } }
-                ];
+                // Customers search conversationally - "navy blue scrubs" - so
+                // the whole phrase rarely appears anywhere. Match on any
+                // meaningful word, across colour and category as well as name
+                // and description: searching name/description alone meant a
+                // colour query returned nothing and the agent reported the
+                // item unavailable.
+                const terms = String(input.query)
+                    .split(/\s+/)
+                    .map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+                    .filter((term) => term.length > 2);
+
+                // Customers type plurals - "scrubs", "sets" - while the
+                // catalogue is singular, so match the stem too. Without this,
+                // "crimson scrubs" found nothing and the agent said we sell no
+                // scrubs at all, rather than "not in crimson".
+                const withSingulars = terms.flatMap((term) =>
+                    term.length > 3 && term.toLowerCase().endsWith('s') ? [term, term.slice(0, -1)] : [term]
+                );
+
+                const searchable = withSingulars.length
+                    ? [...new Set(withSingulars)]
+                    : [String(input.query).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')];
+
+                filter.$or = searchable.flatMap((term) => [
+                    { name: { $regex: term, $options: 'i' } },
+                    { description: { $regex: term, $options: 'i' } },
+                    { category: { $regex: term, $options: 'i' } },
+                    { 'colors.name': { $regex: term, $options: 'i' } }
+                ]);
             }
             if (input.gender) filter.gender = { $regex: `^${input.gender}$`, $options: 'i' };
 
