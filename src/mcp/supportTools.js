@@ -40,6 +40,37 @@ const User = require('../models/user.model');
 const orderController = require('../controllers/order.controller');
 const { recommendSize } = require('../utils/sizeRecommendation');
 const rewardsService = require('../services/rewards.service');
+const { bumpCacheVersion } = require('../utils/cache');
+
+// Agent-placed orders deduct stock, so cached product listings and detail
+// pages have to reflect it - same version-namespace bump checkout uses, so
+// both paths invalidate identically.
+const invalidateProductCaches = () => bumpCacheVersion('products');
+
+/**
+ * A fingerprint of exactly what was quoted to the customer.
+ *
+ * Placing an order is the one irreversible thing this agent can do, and a
+ * prompt instruction is not a control - in testing the model placed an order
+ * straight from "I want to order X", skipping both the quote and the
+ * confirmation. This makes the sequence enforceable in code: place_order
+ * needs a token that only prepare_order issues, and the token only matches if
+ * the items are identical to the ones the customer was shown a total for.
+ *
+ * @param {Array} lines - Priced order lines.
+ * @returns {String} Stable fingerprint of the basket.
+ */
+const buildDraftToken = (lines) =>
+    require('crypto')
+        .createHash('sha256')
+        .update(
+            lines
+                .map((line) => `${line.productId}:${line.colour}:${line.size}:${line.quantity}:${line.unitPrice}`)
+                .sort()
+                .join('|')
+        )
+        .digest('hex')
+        .slice(0, 16);
 
 // Orders a customer may still cancel themselves. Anything further along has
 // left the warehouse and needs a human - the agent says so rather than
@@ -379,10 +410,18 @@ const SUPPORT_TOOLS = [
             // model never supplies a price - if it could, a customer could talk
             // the agent into a discount that checkout would then honour.
             for (const item of requested) {
-                const product = await Product.findById(item.productId);
+                // An unknown id means the model guessed one instead of taking
+                // it from search_products. Say that plainly - the previous
+                // wording fell through to "nothing is available", and the
+                // agent told a customer an in-stock item was sold out.
+                const product = await Product.findById(item.productId).catch(() => null);
                 if (!product) {
-                    problems.push(`No product with id ${item.productId}.`);
-                    continue;
+                    return {
+                        prepared: false,
+                        reason: 'unknown-product',
+                        message:
+                            'That is not a real product id. Call search_products first and use the id it returns - do not invent one. This does not mean the item is unavailable.'
+                    };
                 }
 
                 const quantity = Math.max(Number(item.quantity) || 1, 1);
@@ -431,12 +470,255 @@ const SUPPORT_TOOLS = [
                 items: lines,
                 subtotal,
                 currency: 'PKR',
+                // place_order will not write an order without this. It ties the
+                // order to exactly what was quoted, so the agent cannot change
+                // items between showing a total and charging for it, and it
+                // cannot place an order it never quoted at all.
+                draftToken: buildDraftToken(lines),
                 // Named so the model reads it back rather than treating the
                 // order as already placed.
                 note: 'This is a draft. The order is only placed once the customer completes checkout.',
                 problems: problems.length ? problems : undefined,
                 checkoutUrl,
                 identified: Boolean(context.userId)
+            };
+        }
+    },
+
+    {
+        name: 'place_order',
+        description:
+            'Actually place the order, cash on delivery, to one of the customer\'s saved addresses. Only call this after prepare_order and after the customer has clearly confirmed the items, the total and the address. This charges nothing up front but creates a real order that will be delivered and paid for on arrival - never call it speculatively.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                items: {
+                    type: 'array',
+                    description: 'The confirmed items, same shape as prepare_order.',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            productId: { type: 'string' },
+                            colour: { type: 'string' },
+                            size: { type: 'string' },
+                            quantity: { type: 'integer' }
+                        },
+                        required: ['productId', 'colour', 'size']
+                    }
+                },
+                addressIndex: {
+                    type: 'integer',
+                    description:
+                        'Which saved address to ship to, as listed by get_my_addresses. Defaults to their default address.'
+                },
+                draftToken: {
+                    type: 'string',
+                    description:
+                        'The draftToken returned by prepare_order for these exact items. Required - you cannot place an order you have not quoted.'
+                },
+                customerConfirmed: {
+                    type: 'boolean',
+                    description:
+                        'Set true only after you have shown the customer the items, the total and the delivery address, and they have explicitly agreed in their own words. Never assume agreement from an initial request.'
+                }
+            },
+            required: ['items', 'draftToken', 'customerConfirmed']
+        },
+        handler: async (input, context) => {
+            // Guard 1: identity. An order creates a real delivery obligation
+            // against a real person, so it can only ever be placed for the
+            // customer the caller is authenticated as.
+            if (!context.userId) {
+                return {
+                    placed: false,
+                    reason: 'not-signed-in',
+                    message: 'The customer must be signed in before an order can be placed.'
+                };
+            }
+
+            // Guard 2: the customer actually said yes. Enforced here rather
+            // than trusted to the prompt - see buildDraftToken.
+            if (input.customerConfirmed !== true) {
+                return {
+                    placed: false,
+                    reason: 'not-confirmed',
+                    message:
+                        'Show the customer the items, the total and the delivery address, and wait for them to agree before placing anything.'
+                };
+            }
+
+            const user = await User.findById(context.userId).select('username email addresses rewardPoints');
+            if (!user) return { placed: false, message: 'Customer account not found.' };
+
+            // Guard 2: a saved address only. A delivery address typed into a
+            // chat is unverified and unreviewable - if it is wrong the parcel
+            // is gone. Customers manage addresses in their account.
+            const addresses = user.addresses || [];
+            if (!addresses.length) {
+                return {
+                    placed: false,
+                    reason: 'no-address',
+                    message:
+                        'The customer has no saved address. Ask them to add one in their account, then try again.'
+                };
+            }
+
+            const chosen =
+                (Number.isInteger(input.addressIndex) && addresses[input.addressIndex]) ||
+                addresses.find((entry) => entry.isDefault) ||
+                addresses[0];
+
+            // Guard 3: re-validate stock and price at the moment of writing.
+            // prepare_order may have run several messages ago and the last
+            // unit can sell in between.
+            const processed = [];
+            let subtotal = 0;
+
+            for (const wanted of input.items || []) {
+                const product = await Product.findById(wanted.productId);
+                if (!product) return { placed: false, message: `Product ${wanted.productId} no longer exists.` };
+
+                const quantity = Math.max(Number(wanted.quantity) || 1, 1);
+                const row = (product.inventory || []).find(
+                    (entry) => entry.color === wanted.colour && entry.size === wanted.size
+                );
+
+                if (!row || row.stock < quantity) {
+                    return {
+                        placed: false,
+                        reason: 'out-of-stock',
+                        message: `${product.name} in ${wanted.colour}/${wanted.size} is no longer available in that quantity. Nothing has been ordered.`
+                    };
+                }
+
+                const { price } = getCurrentPrice(product);
+                processed.push({ product, row, quantity, price });
+                subtotal += price * quantity;
+            }
+
+            if (!processed.length) return { placed: false, message: 'No items to order.' };
+
+            // Guard 4: these must be the exact items, at the exact prices, that
+            // prepare_order quoted. A mismatch means the basket changed after
+            // the customer agreed to a total - refuse rather than charge them
+            // for something they did not see.
+            const expectedToken = buildDraftToken(
+                processed.map((entry) => ({
+                    productId: String(entry.product._id),
+                    colour: entry.row.color,
+                    size: entry.row.size,
+                    quantity: entry.quantity,
+                    unitPrice: entry.price
+                }))
+            );
+
+            if (input.draftToken !== expectedToken) {
+                return {
+                    placed: false,
+                    reason: 'draft-mismatch',
+                    message:
+                        'These items do not match the order you quoted. Run prepare_order again, show the customer the new total, and get their agreement before placing it.'
+                };
+            }
+
+            // Same daily-sequence order id format checkout uses, so agent
+            // orders are indistinguishable from web orders downstream.
+            const now = new Date();
+            const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
+            const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const todayCount = await Order.countDocuments({
+                createdAt: { $gte: startOfDay, $lt: new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000) }
+            });
+            const orderId = `${dateStr}-${String(todayCount + 1).padStart(3, '0')}`;
+
+            const previousOrders = await Order.countDocuments({ user: user._id });
+
+            const order = await Order.create({
+                orderId,
+                user: user._id,
+                items: processed.map((entry) => ({
+                    product: entry.product._id,
+                    productName: entry.product.name,
+                    color: entry.row.color,
+                    size: entry.row.size,
+                    quantity: entry.quantity,
+                    price: entry.price
+                })),
+                shippingAddress: {
+                    fullName: chosen.fullName || user.username,
+                    addressLine1: chosen.addressLine1,
+                    addressLine2: chosen.addressLine2,
+                    city: chosen.city,
+                    state: chosen.state || 'N/A',
+                    postalCode: chosen.postalCode || '00000',
+                    country: chosen.country || 'Pakistan',
+                    phoneNumber: chosen.phoneNumber
+                },
+                subtotal,
+                // No discounts, codes, gift cards or points spending through
+                // the agent. Those need the checkout screen, where the
+                // customer can see exactly what is applied before paying.
+                discount: 0,
+                shippingCharges: 0,
+                total: subtotal,
+                pointsUsed: 0,
+                pointsEarned: Math.floor(subtotal / 100),
+                paymentMethod: 'cash-on-delivery',
+                isFirstOrder: previousOrders === 0,
+                statusHistory: [{ status: 'Pending', changedAt: now }],
+                customerEmail: user.email
+            });
+
+            // Deduct stock exactly as checkout does, then invalidate the
+            // product caches so listings reflect it.
+            for (const entry of processed) {
+                entry.row.stock -= entry.quantity;
+                entry.product.totalStock -= entry.quantity;
+                await entry.product.save();
+            }
+            await invalidateProductCaches();
+
+            // Credit the points this order earned, matching checkout.
+            if (order.pointsEarned > 0) {
+                await User.findByIdAndUpdate(user._id, { $inc: { rewardPoints: order.pointsEarned } });
+            }
+
+            return {
+                placed: true,
+                orderId: order.orderId,
+                total: order.total,
+                currency: 'PKR',
+                pointsEarned: order.pointsEarned,
+                paymentMethod: 'Cash on delivery',
+                shippingTo: `${chosen.addressLine1}, ${chosen.city}`,
+                status: order.orderStatus,
+                message:
+                    'Order placed. Tell the customer their order id, the total, that it is cash on delivery, and where it is going.'
+            };
+        }
+    },
+
+    {
+        name: 'get_my_addresses',
+        description:
+            "List the customer's saved delivery addresses so they can choose where an order should go. Call this before place_order if they have more than one.",
+        inputSchema: { type: 'object', properties: {} },
+        handler: async (input, context) => {
+            if (!context.userId) {
+                return { addresses: [], message: 'The customer must be signed in to see their saved addresses.' };
+            }
+            const user = await User.findById(context.userId).select('addresses');
+            const addresses = (user?.addresses || []).map((entry, index) => ({
+                index,
+                label: entry.type,
+                line: [entry.addressLine1, entry.city].filter(Boolean).join(', '),
+                isDefault: Boolean(entry.isDefault)
+            }));
+            return {
+                addresses,
+                message: addresses.length
+                    ? undefined
+                    : 'No saved addresses. They need to add one in their account before ordering through chat.'
             };
         }
     },
