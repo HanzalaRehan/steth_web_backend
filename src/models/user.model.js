@@ -59,8 +59,15 @@ const userSchema = new Schema({
     // reads, kept on the user so it survives independently of the points.
     marketingOptIns: {
       email: { type: Boolean, default: false },
+      // `whatsapp` records that this ACCOUNT asked to be subscribed. It is not
+      // proof that the account owns the number - anyone can type a stranger's
+      // number into a form. `whatsappVerified` is the one that matters: nothing
+      // may be sent to a number until its owner has confirmed it, or we would
+      // be messaging people who never agreed to hear from us.
       whatsapp: { type: Boolean, default: false },
-      whatsappNumber: { type: String, trim: true }
+      whatsappNumber: { type: String, trim: true },
+      whatsappVerified: { type: Boolean, default: false },
+      whatsappVerifiedAt: { type: Date }
     },
     addresses: [{
       type: {

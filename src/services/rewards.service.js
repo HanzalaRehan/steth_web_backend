@@ -167,6 +167,57 @@ const awardRule = async (userId, ruleKey, options = {}) => {
     return { awarded: true, alreadyEarned: false, points, ruleKey, occurrenceKey };
 };
 
+// Accepts an international number and stores one canonical form, so the same
+// phone cannot be claimed twice by writing it differently (+92 300 1234567 vs
+// 00923001234567 vs 03001234567 with spaces).
+const PAKISTAN_LOCAL_PREFIX = '0';
+const PAKISTAN_COUNTRY_CODE = '92';
+
+/**
+ * Normalises a customer-entered phone number to E.164 (+<country><number>).
+ *
+ * @param {String} raw - Whatever the customer typed.
+ * @returns {String} Canonical +... form.
+ * @throws {Error} If it cannot be a real mobile number.
+ */
+const normaliseWhatsappNumber = (raw) => {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) throw new Error('A WhatsApp number is required to subscribe.');
+
+    let digits = trimmed.replace(/[\s()-]/g, '');
+    if (digits.startsWith('00')) digits = `+${digits.slice(2)}`;
+
+    // A local Pakistani number (03001234567) is the common case on our
+    // storefront, so accept it and expand rather than rejecting it.
+    if (digits.startsWith(PAKISTAN_LOCAL_PREFIX) && !digits.startsWith('+')) {
+        digits = `+${PAKISTAN_COUNTRY_CODE}${digits.slice(1)}`;
+    }
+    if (!digits.startsWith('+')) digits = `+${digits}`;
+
+    if (!/^\+[1-9]\d{7,14}$/.test(digits)) {
+        throw new Error('That does not look like a valid WhatsApp number. Include the country code, e.g. +92 300 1234567.');
+    }
+
+    return digits;
+};
+
+/**
+ * EXTENSION POINT - WhatsApp number verification.
+ *
+ * Subscribing currently records intent, never proof of ownership: a customer
+ * can type any number, including someone else's. That is tolerable only
+ * because nothing sends WhatsApp messages yet.
+ *
+ * Before the first message is ever sent, this needs a one-time code delivered
+ * to the number and confirmed back, which then sets
+ * marketingOptIns.whatsappVerified. The WhatsApp Business channel (task 3) is
+ * what makes that possible - it is the same API that would do the sending.
+ *
+ * Until then the rule for anything that sends is: require BOTH
+ * marketingOptIns.whatsapp AND marketingOptIns.whatsappVerified. Never select
+ * recipients on the number alone.
+ */
+
 /**
  * Handles the rules a customer claims themselves, applying the opt-in side
  * effect that goes with them before the points are credited.
@@ -189,12 +240,28 @@ const claimRule = async (userId, ruleKey, payload = {}) => {
     // Record the consent before paying for it, so we never hand out points
     // for an opt-in we failed to store.
     if (ruleKey === 'SUBSCRIBE_WHATSAPP') {
-        const whatsappNumber = (payload.whatsappNumber || '').trim();
-        if (!whatsappNumber) {
-            throw new Error('A WhatsApp number is required to subscribe.');
+        const whatsappNumber = normaliseWhatsappNumber(payload.whatsappNumber);
+
+        // One account may not claim a number another account already holds.
+        // Without this, several accounts could each point at one victim's
+        // number and there would be no single record to revoke.
+        const takenBy = await User.findOne({
+            'marketingOptIns.whatsappNumber': whatsappNumber,
+            _id: { $ne: userId }
+        }).select('_id');
+
+        if (takenBy) {
+            throw new Error('That number is already subscribed on another account.');
         }
+
         await User.findByIdAndUpdate(userId, {
-            $set: { 'marketingOptIns.whatsapp': true, 'marketingOptIns.whatsappNumber': whatsappNumber }
+            $set: {
+                'marketingOptIns.whatsapp': true,
+                'marketingOptIns.whatsappNumber': whatsappNumber,
+                // Deliberately NOT verified. Typing a number proves intent,
+                // not ownership - see the extension point below.
+                'marketingOptIns.whatsappVerified': false
+            }
         });
     }
 
