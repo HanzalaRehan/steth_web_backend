@@ -15,6 +15,8 @@
  *        "What's My Size?" and size quiz feature.
  *   (2): Mounted the loyalty programme routes at /api/rewards.
  *   (3): Mounted the customer support agent routes at /api/support.
+ *   (4): Mounted the messaging channel webhooks at /api/channels, and kept
+ *        the raw request body so their signatures can be verified.
  * Date last modified: August 3rd, 2026
  * Run: npm run dev   (development)  |  npm start   (production)
  */
@@ -56,6 +58,7 @@ const affiliateRoutes = require('./routes/affiliate.routes');
 const sizeRoutes = require('./routes/size.routes');
 const rewardsRoutes = require('./routes/rewards.routes');
 const supportAgentRoutes = require('./routes/supportAgent.routes');
+const channelsRoutes = require('./routes/channels.routes');
 
 const app = express();
 
@@ -72,9 +75,14 @@ ensureDirectoryExists(path.join(__dirname, 'uploads'));
 ensureDirectoryExists(path.join(__dirname, 'temp'));
 
 // IMPORTANT: Increase payload limits for large file uploads (BEFORE other middleware)
-app.use(express.json({ 
+app.use(express.json({
   limit: '50mb',
-  extended: true 
+  extended: true,
+  // Keep the exact bytes of the request alongside the parsed body. Meta signs
+  // its webhooks over the raw payload, and re-serialising the parsed JSON
+  // produces different bytes, so the HMAC would never match. Only the channel
+  // webhooks read this.
+  verify: (req, res, buf) => { req.rawBody = buf; }
 }));
 app.use(express.urlencoded({ 
   limit: '50mb',
@@ -158,6 +166,7 @@ app.use('/api/affiliates', affiliateRoutes);
 app.use('/api/size', sizeRoutes);
 app.use('/api/rewards', rewardsRoutes);
 app.use('/api/support', supportAgentRoutes);
+app.use('/api/channels', channelsRoutes);
 
 // Enhanced error handling middleware for file uploads
 app.use((error, req, res, next) => {
