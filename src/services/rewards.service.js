@@ -56,6 +56,7 @@ const emailService = require('../utils/emailService');
 const {
     CADENCE,
     TRIGGER,
+    CATEGORY,
     REWARD_RULES,
     POINTS_EXPIRY_DAYS,
     POINT_VALUE_PKR,
@@ -548,6 +549,84 @@ const syncDerivedRewards = async (userId) => {
 };
 
 /**
+ * How close a customer is to each purchase reward.
+ *
+ * Without this the purchase rules are invisible work: a customer sees "Place 5
+ * Orders in 1 Year - 1000 Points" with no idea they are already on three. The
+ * numbers are derived from the same order list the evaluators use, so what the
+ * page promises and what the engine pays can never disagree.
+ *
+ * @param {String} ruleKey - Catalogue rule key.
+ * @param {Array} orders - Non-cancelled orders, oldest first.
+ * @returns {Object|null} { current, target, remaining, unit, label } or null
+ *                        for rules that are not progress-based.
+ */
+const buildPurchaseProgress = (ruleKey, orders) => {
+    const count = orders.length;
+    const MS = MS_PER_DAY;
+
+    if (ruleKey === 'SECOND_ORDER' || ruleKey === 'SECOND_ORDER_FAST') {
+        return {
+            current: Math.min(count, 2),
+            target: 2,
+            remaining: Math.max(0, 2 - count),
+            unit: 'orders',
+            label: `${Math.min(count, 2)} of 2 orders`
+        };
+    }
+
+    if (ruleKey === 'ORDER_COUNT_MILESTONE') {
+        const { orderCount, windowDays } = REWARD_RULES.ORDER_COUNT_MILESTONE;
+        // The best run inside any rolling window, not a calendar year - an
+        // order in December and four in January should count.
+        let best = Math.min(count, 1);
+        for (let i = 0; i < orders.length; i += 1) {
+            const from = new Date(orders[i].createdAt);
+            const run = orders.filter((order) => {
+                const at = new Date(order.createdAt);
+                return at >= from && (at - from) / MS <= windowDays;
+            }).length;
+            if (run > best) best = run;
+        }
+        return {
+            current: Math.min(best, orderCount),
+            target: orderCount,
+            remaining: Math.max(0, orderCount - best),
+            unit: 'orders',
+            label: `${Math.min(best, orderCount)} of ${orderCount} orders this year`
+        };
+    }
+
+    if (ruleKey === 'HIGH_VALUE_ORDER') {
+        const threshold = REWARD_RULES.HIGH_VALUE_ORDER.thresholdPkr;
+        const biggest = orders.reduce((max, order) => Math.max(max, order.total || 0), 0);
+        return {
+            current: Math.min(biggest, threshold),
+            target: threshold,
+            remaining: Math.max(0, threshold - biggest),
+            unit: 'PKR',
+            label: `Biggest order so far: PKR ${Math.round(biggest).toLocaleString('en-PK')}`
+        };
+    }
+
+    if (ruleKey === 'RECURRING_PURCHASE') {
+        const { thresholdPkr, interval } = REWARD_RULES.RECURRING_PURCHASE;
+        const qualifying = orders.filter((order) => order.total >= thresholdPkr).length;
+        // Position within the current cycle, so it resets after each payout.
+        const inCycle = qualifying % interval;
+        return {
+            current: inCycle,
+            target: interval,
+            remaining: interval - inCycle,
+            unit: 'orders',
+            label: `${inCycle} of ${interval} qualifying orders toward your next bonus`
+        };
+    }
+
+    return null;
+};
+
+/**
  * Everything the rewards page needs: the balance, the catalogue annotated
  * with what this customer has already earned, and recent history.
  *
@@ -563,6 +642,10 @@ const getRewardsSummary = async (userId, options = {}) => {
     const historyLimit = options.historyLimit || 25;
 
     const sync = await syncDerivedRewards(userId);
+
+    // Every order that counts toward a milestone, oldest first - the same set
+    // the evaluators run on, so progress and payout agree.
+    const milestoneOrders = await getMilestoneOrders(userId);
 
     const [user, transactions, pointsEarningOrders] = await Promise.all([
         User.findById(userId).select('rewardPoints dateOfBirth marketingOptIns username'),
@@ -617,6 +700,12 @@ const getRewardsSummary = async (userId, options = {}) => {
             // Lets the page prompt for what is missing rather than showing a
             // reward the customer can never actually earn.
             blockedBy: rule.requiresDateOfBirth && !user.dateOfBirth ? 'dateOfBirth' : null,
+            // How close they are, for the purchase rules only. Null elsewhere -
+            // there is no meaningful "progress" toward following us on TikTok.
+            progress:
+                rule.category === CATEGORY.PURCHASE
+                    ? buildPurchaseProgress(rule.key, milestoneOrders)
+                    : null,
             // Where the card sends the customer before it pays out:
             // actionUrl leaves the site, actionPath stays inside it.
             actionUrl: rule.actionUrl || null,
