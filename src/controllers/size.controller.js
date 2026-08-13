@@ -215,6 +215,11 @@ exports.getSizeChart = catchAsync(async (req, res) => {
             top: TOP_CHART,
             pants: PANTS_CHART,
             unit: 'inches',
+            // Served so the form can bound its own inputs to exactly what this
+            // API accepts. Duplicating these numbers in the frontend would let
+            // the two drift, and the customer would meet a rejection the form
+            // told them was fine.
+            measurementBounds: MEASUREMENT_BOUNDS,
             notes: [
                 'All size measurements are in inches',
                 `Lengths are adjustable upto ${PANTS_LENGTH_ADJUSTMENT_INCHES}"`
