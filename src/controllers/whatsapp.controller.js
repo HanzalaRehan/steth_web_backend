@@ -46,6 +46,22 @@ const { catchAsync } = require('../utils/errorHandler');
 const GRAPH_VERSION = 'v21.0';
 
 /**
+ * Converts WhatsApp's `wa_id` to the E.164 form the rest of the system uses.
+ *
+ * Meta sends a bare number - "923001234567" - while account verification
+ * stores "+923001234567". Without this the two never match, so a customer who
+ * verified their number would still arrive as an unknown sender and be denied
+ * their own order history.
+ *
+ * @param {String} waId - Sender id from the webhook payload.
+ * @returns {String} E.164 number.
+ */
+const toE164 = (waId) => {
+    const digits = String(waId || '').replace(/[^\d]/g, '');
+    return digits ? `+${digits}` : '';
+};
+
+/**
  * Whether the WhatsApp channel has everything it needs to run.
  * @returns {Object} { ready, missing }
  */
@@ -172,7 +188,8 @@ exports.receiveWebhook = catchAsync(async (req, res) => {
 
                     const result = await channelAgent.handleChannelMessage({
                         channel: 'whatsapp',
-                        handle: message.from,
+                        // Normalised, so it matches a verified account number.
+                        handle: toE164(message.from),
                         messageId: message.id,
                         text: message.text.body,
                         profile: { displayName: profile?.profile?.name }

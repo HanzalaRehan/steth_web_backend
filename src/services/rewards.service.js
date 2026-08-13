@@ -775,6 +775,7 @@ const getRewardsSummary = async (userId, options = {}) => {
 };
 
 module.exports = {
+    normaliseWhatsappNumber,
     awardRule,
     claimRule,
     syncDerivedRewards,

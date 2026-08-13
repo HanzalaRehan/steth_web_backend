@@ -29,6 +29,7 @@
 
 const User = require('../models/user.model');
 const rewardsService = require('../services/rewards.service');
+const whatsappVerification = require('../services/whatsappVerification.service');
 const { catchAsync } = require('../utils/errorHandler');
 const {
     listRules,
@@ -181,6 +182,80 @@ exports.setDateOfBirth = catchAsync(async (req, res) => {
             ? `Saved - and you earned ${sync.pointsAwarded} points!`
             : 'Saved. Your birthday reward will land on your next birthday.',
         data: sync
+    });
+});
+
+/**
+ * POST /api/rewards/whatsapp/verify/start
+ * Sends a one-time code to the number the customer is claiming.
+ * Body: { whatsappNumber }.
+ */
+exports.startWhatsappVerification = catchAsync(async (req, res) => {
+    let normalised;
+    try {
+        normalised = rewardsService.normaliseWhatsappNumber(req.body.whatsappNumber);
+    } catch (error) {
+        return res.status(400).json({ success: false, message: error.message });
+    }
+
+    let result;
+    try {
+        result = await whatsappVerification.startVerification(req.user._id, normalised);
+    } catch (error) {
+        return res.status(400).json({ success: false, message: error.message });
+    }
+
+    if (result.retryAfterSeconds) {
+        return res.status(429).json({
+            success: false,
+            message: `Please wait ${result.retryAfterSeconds} seconds before asking for another code.`
+        });
+    }
+
+    res.status(200).json({
+        success: true,
+        message: result.sent
+            ? 'We have sent a code to that WhatsApp number.'
+            : 'WhatsApp is not configured on this server, so no code was sent.',
+        data: {
+            sent: result.sent,
+            delivery: result.delivery,
+            // Only ever present outside production - see the service.
+            devCode: result.devCode
+        }
+    });
+});
+
+/**
+ * POST /api/rewards/whatsapp/verify/confirm
+ * Confirms the code and marks the number verified. Body: { code }.
+ */
+exports.confirmWhatsappVerification = catchAsync(async (req, res) => {
+    const { code } = req.body;
+    if (!code) {
+        return res.status(400).json({ success: false, message: 'The code is required.' });
+    }
+
+    const result = await whatsappVerification.confirmVerification(req.user._id, String(code).trim());
+
+    if (!result.verified) {
+        // Each reason needs different advice - "expired" and "wrong code" call
+        // for different next steps.
+        const messages = {
+            'no-pending-code': 'Ask for a code first.',
+            expired: 'That code has expired. Ask for a new one.',
+            'too-many-attempts': 'Too many incorrect attempts. Ask for a new code.',
+            incorrect: 'That code is not right. Check it and try again.'
+        };
+        return res.status(400).json({
+            success: false,
+            message: messages[result.reason] || 'We could not verify that number.'
+        });
+    }
+
+    res.status(200).json({
+        success: true,
+        message: 'Your WhatsApp number is verified. You can now message us on WhatsApp about your orders.'
     });
 });
 
