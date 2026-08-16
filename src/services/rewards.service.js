@@ -78,10 +78,19 @@ const ensureLedgerIndexes = () => {
     return ledgerIndexesReady;
 };
 
-// Cancelled orders never count toward any milestone. Everything else does,
-// matching how order.controller.js already credits its per-order points at
-// creation time rather than waiting for delivery.
-const MILESTONE_ORDER_FILTER = { orderStatus: { $ne: 'Cancelled' } };
+// Only delivered orders count toward a purchase milestone. A placed order is
+// not a completed sale: it can still be cancelled, refused at the door on
+// cash-on-delivery, or returned. Paying "your 5th order" on an order that
+// never arrives means clawing points back later, which is worse for the
+// customer than waiting for them.
+const MILESTONE_ORDER_FILTER = { orderStatus: 'Delivered' };
+
+// The activity feed is a different question: per-order points are credited by
+// checkout the moment an order is created, so the feed has to show every order
+// that actually paid out, or a customer sees points in their balance with
+// nothing explaining them. Cancelled orders are excluded because
+// cancelOrder reverses their points.
+const EARNED_POINTS_ORDER_FILTER = { orderStatus: { $ne: 'Cancelled' } };
 
 /**
  * The occurrence key for a rule, given its cadence. See the ledger model for
@@ -571,7 +580,7 @@ const buildPurchaseProgress = (ruleKey, orders) => {
             target: 2,
             remaining: Math.max(0, 2 - count),
             unit: 'orders',
-            label: `${Math.min(count, 2)} of 2 orders`
+            label: `${Math.min(count, 2)} of 2 delivered orders`
         };
     }
 
@@ -593,7 +602,7 @@ const buildPurchaseProgress = (ruleKey, orders) => {
             target: orderCount,
             remaining: Math.max(0, orderCount - best),
             unit: 'orders',
-            label: `${Math.min(best, orderCount)} of ${orderCount} orders this year`
+            label: `${Math.min(best, orderCount)} of ${orderCount} delivered orders this year`
         };
     }
 
@@ -605,7 +614,7 @@ const buildPurchaseProgress = (ruleKey, orders) => {
             target: threshold,
             remaining: Math.max(0, threshold - biggest),
             unit: 'PKR',
-            label: `Biggest order so far: PKR ${Math.round(biggest).toLocaleString('en-PK')}`
+            label: `Biggest delivered order: PKR ${Math.round(biggest).toLocaleString('en-PK')}`
         };
     }
 
@@ -619,7 +628,7 @@ const buildPurchaseProgress = (ruleKey, orders) => {
             target: interval,
             remaining: interval - inCycle,
             unit: 'orders',
-            label: `${inCycle} of ${interval} qualifying orders toward your next bonus`
+            label: `${inCycle} of ${interval} qualifying delivered orders toward your next bonus`
         };
     }
 
@@ -654,7 +663,7 @@ const getRewardsSummary = async (userId, options = {}) => {
         // to the balance and were never ledger rows. They are read here purely
         // so the activity table is complete - deliberately NOT written into the
         // ledger, which would double-credit a balance checkout already updated.
-        Order.find({ user: userId, pointsEarned: { $gt: 0 }, ...MILESTONE_ORDER_FILTER })
+        Order.find({ user: userId, pointsEarned: { $gt: 0 }, ...EARNED_POINTS_ORDER_FILTER })
             .select('orderId pointsEarned createdAt')
             .lean()
     ]);
