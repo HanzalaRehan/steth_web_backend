@@ -45,7 +45,24 @@ const { bumpCacheVersion } = require('../utils/cache');
 // Agent-placed orders deduct stock, so cached product listings and detail
 // pages have to reflect it - same version-namespace bump checkout uses, so
 // both paths invalidate identically.
-const invalidateProductCaches = () => bumpCacheVersion('products');
+// Best-effort, and deliberately time-boxed. ioredis is configured to retry a
+// command forever (maxRetriesPerRequest: null, required by BullMQ), so if Redis
+// is down this call never settles - which would hang place_order *after* the
+// order was already written and stock deducted, leaving the customer with no
+// confirmation for an order that exists. A stale cache for a few minutes is a
+// far smaller problem than that.
+const CACHE_INVALIDATION_TIMEOUT_MS = 2000;
+
+const invalidateProductCaches = async () => {
+    try {
+        await Promise.race([
+            bumpCacheVersion('products'),
+            new Promise((resolve) => setTimeout(resolve, CACHE_INVALIDATION_TIMEOUT_MS))
+        ]);
+    } catch (error) {
+        console.error('[support-agent] product cache invalidation failed:', error.message);
+    }
+};
 
 /**
  * Matches what a customer called a colour or size against what the product
@@ -627,8 +644,12 @@ const SUPPORT_TOOLS = [
                 lines.push({
                     productId: String(product._id),
                     product: product.name,
-                    colour: item.colour,
-                    size: item.size,
+                    // The catalogue's own spelling, not the customer's wording.
+                    // place_order fingerprints the resolved variant, so quoting
+                    // "navy" here and storing "Navy" there made every draft
+                    // token mismatch and refused the order.
+                    colour: match.colour,
+                    size: match.size,
                     quantity,
                     unitPrice,
                     lineTotal: unitPrice * quantity
@@ -698,6 +719,11 @@ const SUPPORT_TOOLS = [
                     type: 'integer',
                     description:
                         'Which saved address to ship to, as listed by get_my_addresses. Defaults to their default address.'
+                },
+                pointsToUse: {
+                    type: 'integer',
+                    description:
+                        'How many reward points to spend on this order, 1 point = 1 PKR off. Ask the customer how many they want to use before ordering, and pass the number they said. Pass 0 if they want to keep their points. Never guess a number.'
                 },
                 draftToken: {
                     type: 'string',
@@ -792,6 +818,32 @@ const SUPPORT_TOOLS = [
 
             if (!processed.length) return { placed: false, message: 'No items to order.' };
 
+            // Points redemption. Spending a balance is irreversible from the
+            // customer's side, so it is validated here rather than trusted
+            // from the model: a hallucinated number would otherwise wipe a
+            // balance the customer never agreed to spend.
+            const pointsToUse = Math.max(0, Math.floor(Number(input.pointsToUse) || 0));
+
+            if (pointsToUse > 0) {
+                if (pointsToUse > user.rewardPoints) {
+                    return {
+                        placed: false,
+                        reason: 'insufficient-points',
+                        message: `They only have ${user.rewardPoints} points. Nothing has been ordered - confirm a smaller amount.`
+                    };
+                }
+                // Points cannot exceed the order value: a negative total would
+                // fail the order model's own arithmetic check, and refunding
+                // the difference is not something this flow can do.
+                if (pointsToUse > subtotal) {
+                    return {
+                        placed: false,
+                        reason: 'too-many-points',
+                        message: `This order is only PKR ${subtotal}, so at most ${subtotal} points can be used. Nothing has been ordered.`
+                    };
+                }
+            }
+
             // Guard 4: these must be the exact items, at the exact prices, that
             // prepare_order quoted. A mismatch means the basket changed after
             // the customer agreed to a total - refuse rather than charge them
@@ -852,11 +904,16 @@ const SUPPORT_TOOLS = [
                 // No discounts, codes, gift cards or points spending through
                 // the agent. Those need the checkout screen, where the
                 // customer can see exactly what is applied before paying.
-                discount: 0,
+                // Points spent are recorded as the order's discount, because
+                // the model enforces total = subtotal - discount + shipping.
+                // Recording them only in pointsUsed would leave the order
+                // failing its own validation.
+                discount: pointsToUse,
                 shippingCharges: 0,
-                total: subtotal,
-                pointsUsed: 0,
-                pointsEarned: Math.floor(subtotal / 100),
+                total: subtotal - pointsToUse,
+                pointsUsed: pointsToUse,
+                // Earned on what they actually pay, matching checkout.
+                pointsEarned: Math.floor((subtotal - pointsToUse) / 100),
                 paymentMethod: 'cash-on-delivery',
                 isFirstOrder: previousOrders === 0,
                 statusHistory: [{ status: 'Pending', changedAt: now }],
@@ -873,8 +930,11 @@ const SUPPORT_TOOLS = [
             await invalidateProductCaches();
 
             // Credit the points this order earned, matching checkout.
-            if (order.pointsEarned > 0) {
-                await User.findByIdAndUpdate(user._id, { $inc: { rewardPoints: order.pointsEarned } });
+            // Net movement in one write, exactly as checkout does it:
+            // spend what they redeemed, credit what this order earned.
+            const pointsDelta = order.pointsEarned - order.pointsUsed;
+            if (pointsDelta !== 0) {
+                await User.findByIdAndUpdate(user._id, { $inc: { rewardPoints: pointsDelta } });
             }
 
             return {
@@ -883,6 +943,10 @@ const SUPPORT_TOOLS = [
                 total: order.total,
                 currency: 'PKR',
                 pointsEarned: order.pointsEarned,
+                // Both movements, so the agent can tell them what they spent
+                // and what they have left rather than only the total.
+                pointsUsed: order.pointsUsed,
+                pointsBalance: Math.max(0, user.rewardPoints - order.pointsUsed + order.pointsEarned),
                 paymentMethod: 'Cash on delivery',
                 shippingTo: `${chosen.addressLine1}, ${chosen.city}`,
                 status: order.orderStatus,
