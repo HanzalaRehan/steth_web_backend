@@ -12,6 +12,16 @@ const orderSchema = new mongoose.Schema({
     ref: 'User',
     required: false // Allow guest orders
   },
+  // Set when an order was placed through WhatsApp or Instagram by someone who
+  // has no website account. Their channel handle is the only identity we have,
+  // so this is what lets them ask "where is my order?" later and get an answer
+  // - without it, a chat-placed order would be unreachable by its own customer.
+  // Null for every web order, so nothing existing changes.
+  channelIdentity: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ChannelIdentity',
+    default: null
+  },
   items: [{
     product: {
       type: mongoose.Schema.Types.ObjectId,
@@ -199,6 +209,8 @@ const orderSchema = new mongoose.Schema({
 
 // Index for efficient queries
 orderSchema.index({ user: 1, createdAt: -1 });
+// "Show me my orders" from a chat channel, where there is no user id.
+orderSchema.index({ channelIdentity: 1, createdAt: -1 });
 orderSchema.index({ orderStatus: 1 });
 orderSchema.index({ paymentStatus: 1 });
 

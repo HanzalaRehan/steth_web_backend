@@ -37,6 +37,7 @@
 const Product = require('../models/product.model');
 const Order = require('../models/order.model');
 const User = require('../models/user.model');
+const ChannelIdentity = require('../models/channelIdentity.model');
 const orderController = require('../controllers/order.controller');
 const { recommendSize } = require('../utils/sizeRecommendation');
 const rewardsService = require('../services/rewards.service');
@@ -320,6 +321,13 @@ const findOwnedOrder = async (reference, context) => {
     const owner = [];
     if (context.userId) owner.push({ user: context.userId });
     if (context.email) owner.push({ customerEmail: String(context.email).toLowerCase() });
+    // A verified WhatsApp customer with no website account owns their orders
+    // through their channel handle, which is the only identity they have.
+    // Unverified handles are excluded: anyone can message from a number, and
+    // an unproven handle must never reach someone else's orders.
+    if (context.channelIdentityId && context.identityStatus !== 'unverified') {
+        owner.push({ channelIdentity: context.channelIdentityId });
+    }
     if (!owner.length) return null;
 
     const reference_ = String(reference || '').trim();
@@ -455,13 +463,18 @@ const SUPPORT_TOOLS = [
             }
         },
         handler: async (input, context) => {
-            if (!context.userId && !context.email) {
-                return { identified: false, message: 'This customer is not identified yet.' };
-            }
-
             const owner = [];
             if (context.userId) owner.push({ user: context.userId });
             if (context.email) owner.push({ customerEmail: String(context.email).toLowerCase() });
+            // Verified chat customers own orders through their handle - see
+            // findOwnedOrder for why unverified handles are excluded.
+            if (context.channelIdentityId && context.identityStatus !== 'unverified') {
+                owner.push({ channelIdentity: context.channelIdentityId });
+            }
+
+            if (!owner.length) {
+                return { identified: false, message: 'This customer is not identified yet.' };
+            }
 
             const orders = await Order.find({ $or: owner })
                 .sort({ createdAt: -1 })
@@ -739,14 +752,23 @@ const SUPPORT_TOOLS = [
             required: ['items', 'draftToken', 'customerConfirmed']
         },
         handler: async (input, context) => {
-            // Guard 1: identity. An order creates a real delivery obligation
-            // against a real person, so it can only ever be placed for the
-            // customer the caller is authenticated as.
-            if (!context.userId) {
+            // Guard 1: identity. An order is a real delivery obligation, so we
+            // must know who it is for. Two ways to know that: a signed-in
+            // website account, or a chat handle whose owner has proved they
+            // control it. An unverified handle is nobody - anyone can message
+            // from a number they do not own.
+            const isChannelCustomer =
+                !context.userId &&
+                Boolean(context.channelIdentityId) &&
+                context.identityStatus !== 'unverified';
+
+            if (!context.userId && !isChannelCustomer) {
                 return {
                     placed: false,
-                    reason: 'not-signed-in',
-                    message: 'The customer must be signed in before an order can be placed.'
+                    reason: 'not-identified',
+                    message: context.channelIdentityId
+                        ? 'This handle is not verified yet. Ask them to confirm the code we sent before ordering.'
+                        : 'The customer must be signed in before an order can be placed.'
                 };
             }
 
@@ -761,14 +783,37 @@ const SUPPORT_TOOLS = [
                 };
             }
 
-            const user = await User.findById(context.userId).select('username email addresses rewardPoints');
-            if (!user) return { placed: false, message: 'Customer account not found.' };
+            // A chat customer has no account, so the identity carries their
+            // details instead. Everything downstream reads through these two,
+            // which keeps one order-writing path rather than two that drift.
+            let user = null;
+            let identity = null;
 
-            // Guard 2: a saved address only. A delivery address typed into a
-            // chat is unverified and unreviewable - if it is wrong the parcel
-            // is gone. Customers manage addresses in their account.
-            const addresses = user.addresses || [];
-            if (!addresses.length) {
+            if (isChannelCustomer) {
+                identity = await ChannelIdentity.findById(context.channelIdentityId);
+                if (!identity) return { placed: false, message: 'Chat identity not found.' };
+            } else {
+                user = await User.findById(context.userId).select('username email addresses rewardPoints');
+                if (!user) return { placed: false, message: 'Customer account not found.' };
+            }
+
+            // Guard 2: an address we have actually captured. For an account
+            // that means a saved address, which was entered somewhere
+            // reviewable. For a chat customer it means one they gave us and we
+            // read back - collected by save_delivery_address, never inferred
+            // from conversation here.
+            const addresses = user ? user.addresses || [] : [];
+
+            if (isChannelCustomer && !identity.deliveryAddress?.addressLine1) {
+                return {
+                    placed: false,
+                    reason: 'no-address',
+                    message:
+                        'Ask the customer for their full delivery address - name, street and city - and save it with save_delivery_address before ordering.'
+                };
+            }
+
+            if (!isChannelCustomer && !addresses.length) {
                 return {
                     placed: false,
                     reason: 'no-address',
@@ -777,7 +822,9 @@ const SUPPORT_TOOLS = [
                 };
             }
 
-            const chosen =
+            const chosen = isChannelCustomer
+                ? identity.deliveryAddress
+                :
                 (Number.isInteger(input.addressIndex) && addresses[input.addressIndex]) ||
                 addresses.find((entry) => entry.isDefault) ||
                 addresses[0];
@@ -822,7 +869,10 @@ const SUPPORT_TOOLS = [
             // customer's side, so it is validated here rather than trusted
             // from the model: a hallucinated number would otherwise wipe a
             // balance the customer never agreed to spend.
-            const pointsToUse = Math.max(0, Math.floor(Number(input.pointsToUse) || 0));
+            // Loyalty points belong to an account. A chat customer without one
+            // has no balance to spend, so any number here is ignored rather
+            // than silently discounting an order nobody paid for.
+            const pointsToUse = user ? Math.max(0, Math.floor(Number(input.pointsToUse) || 0)) : 0;
 
             if (pointsToUse > 0) {
                 if (pointsToUse > user.rewardPoints) {
@@ -877,11 +927,23 @@ const SUPPORT_TOOLS = [
             });
             const orderId = `${dateStr}-${String(todayCount + 1).padStart(3, '0')}`;
 
-            const previousOrders = await Order.countDocuments({ user: user._id });
+            const previousOrders = await Order.countDocuments(
+                user ? { user: user._id } : { channelIdentity: identity._id }
+            );
+
+            // The Order model requires an email and a chat customer may not
+            // have given one. A deterministic address derived from their handle
+            // keeps the record valid and traceable back to the conversation;
+            // their real confirmation goes to them in the chat itself, which is
+            // where they are actually reading.
+            const customerEmail = user
+                ? user.email
+                : `${identity.channel}-${String(identity.handle).replace(/[^\w]/g, '')}@chat.steth.local`;
 
             const order = await Order.create({
                 orderId,
-                user: user._id,
+                user: user ? user._id : undefined,
+                channelIdentity: user ? undefined : identity._id,
                 items: processed.map((entry) => ({
                     product: entry.product._id,
                     productName: entry.product.name,
@@ -891,7 +953,7 @@ const SUPPORT_TOOLS = [
                     price: entry.price
                 })),
                 shippingAddress: {
-                    fullName: chosen.fullName || user.username,
+                    fullName: chosen.fullName || (user ? user.username : identity.displayName) || 'Customer',
                     addressLine1: chosen.addressLine1,
                     addressLine2: chosen.addressLine2,
                     city: chosen.city,
@@ -913,11 +975,11 @@ const SUPPORT_TOOLS = [
                 total: subtotal - pointsToUse,
                 pointsUsed: pointsToUse,
                 // Earned on what they actually pay, matching checkout.
-                pointsEarned: Math.floor((subtotal - pointsToUse) / 100),
+                pointsEarned: user ? Math.floor((subtotal - pointsToUse) / 100) : 0,
                 paymentMethod: 'cash-on-delivery',
                 isFirstOrder: previousOrders === 0,
                 statusHistory: [{ status: 'Pending', changedAt: now }],
-                customerEmail: user.email
+                customerEmail
             });
 
             // Deduct stock exactly as checkout does, then invalidate the
@@ -932,8 +994,10 @@ const SUPPORT_TOOLS = [
             // Credit the points this order earned, matching checkout.
             // Net movement in one write, exactly as checkout does it:
             // spend what they redeemed, credit what this order earned.
+            // Only an account has a balance to move. A chat customer with no
+            // account neither spends nor earns.
             const pointsDelta = order.pointsEarned - order.pointsUsed;
-            if (pointsDelta !== 0) {
+            if (user && pointsDelta !== 0) {
                 await User.findByIdAndUpdate(user._id, { $inc: { rewardPoints: pointsDelta } });
             }
 
@@ -946,7 +1010,9 @@ const SUPPORT_TOOLS = [
                 // Both movements, so the agent can tell them what they spent
                 // and what they have left rather than only the total.
                 pointsUsed: order.pointsUsed,
-                pointsBalance: Math.max(0, user.rewardPoints - order.pointsUsed + order.pointsEarned),
+                pointsBalance: user
+                    ? Math.max(0, user.rewardPoints - order.pointsUsed + order.pointsEarned)
+                    : null,
                 paymentMethod: 'Cash on delivery',
                 shippingTo: `${chosen.addressLine1}, ${chosen.city}`,
                 status: order.orderStatus,
@@ -977,6 +1043,64 @@ const SUPPORT_TOOLS = [
                 message: addresses.length
                     ? undefined
                     : 'No saved addresses. They need to add one in their account before ordering through chat.'
+            };
+        }
+    },
+
+    {
+        name: 'save_delivery_address',
+        description:
+            "Save the delivery address for a chat customer who has no Steth account. Call this only after they have given you a street address, a city and a name for the parcel. Read it back to them before placing any order - a wrong address in chat means a lost parcel.",
+        inputSchema: {
+            type: 'object',
+            properties: {
+                fullName: { type: 'string', description: 'Name the parcel is for.' },
+                addressLine1: { type: 'string', description: 'Street address.' },
+                addressLine2: { type: 'string', description: 'Apartment, floor or landmark. Optional.' },
+                city: { type: 'string', description: 'City.' },
+                postalCode: { type: 'string', description: 'Postal code, if they know it.' },
+                phoneNumber: { type: 'string', description: 'Contact number for the courier.' }
+            },
+            required: ['fullName', 'addressLine1', 'city']
+        },
+        handler: async (input, context) => {
+            if (!context.channelIdentityId) {
+                return {
+                    saved: false,
+                    message: 'This only applies to chat customers. A website customer manages addresses in their account.'
+                };
+            }
+            if (context.identityStatus === 'unverified') {
+                return {
+                    saved: false,
+                    message: 'This handle is not verified yet, so no address can be stored against it.'
+                };
+            }
+
+            const identity = await ChannelIdentity.findById(context.channelIdentityId);
+            if (!identity) return { saved: false, message: 'Chat identity not found.' };
+
+            identity.deliveryAddress = {
+                fullName: String(input.fullName).trim(),
+                addressLine1: String(input.addressLine1).trim(),
+                addressLine2: input.addressLine2 ? String(input.addressLine2).trim() : undefined,
+                city: String(input.city).trim(),
+                postalCode: input.postalCode ? String(input.postalCode).trim() : undefined,
+                country: 'Pakistan',
+                // Falls back to the handle itself for WhatsApp, which is
+                // already a working phone number the courier can call.
+                phoneNumber: input.phoneNumber
+                    ? String(input.phoneNumber).trim()
+                    : identity.channel === 'whatsapp'
+                        ? identity.handle
+                        : undefined
+            };
+            await identity.save();
+
+            return {
+                saved: true,
+                address: identity.deliveryAddress,
+                message: 'Address saved. Read it back to the customer before placing the order.'
             };
         }
     },
