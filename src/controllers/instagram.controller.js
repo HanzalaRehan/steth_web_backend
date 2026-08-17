@@ -199,9 +199,13 @@ exports.status = (req, res) => {
             channel: 'instagram',
             ready,
             missing,
-            // Stated explicitly so nobody expects order lookups here: the
-            // platform gives us no way to prove who the sender is.
-            capabilities: 'products and sizing only - Instagram provides no verifiable identity'
+            // Instagram senders can order and track their own orders: Meta
+            // authenticates the sender id on every signed webhook, so the
+            // thread itself is the identity. What they cannot reach is a Steth
+            // ACCOUNT - Instagram exposes no phone or email to match on - so
+            // account order history and reward points stay out of reach.
+            capabilities:
+                'products, sizing, ordering and tracking own orders; no account linking (no phone or email exposed by Instagram)'
         }
     });
 };

@@ -321,11 +321,14 @@ const findOwnedOrder = async (reference, context) => {
     const owner = [];
     if (context.userId) owner.push({ user: context.userId });
     if (context.email) owner.push({ customerEmail: String(context.email).toLowerCase() });
-    // A verified WhatsApp customer with no website account owns their orders
-    // through their channel handle, which is the only identity they have.
-    // Unverified handles are excluded: anyone can message from a number, and
-    // an unproven handle must never reach someone else's orders.
-    if (context.channelIdentityId && context.identityStatus !== 'unverified') {
+    // Orders placed from this chat thread belong to this chat thread. The
+    // sender id comes from a signature-verified Meta webhook, not from
+    // anything the customer typed, so it authentically identifies whoever is
+    // messaging - which is all that is needed to return their OWN channel
+    // orders. OTP verification is a different question: it proves a handle
+    // owns a Steth ACCOUNT, and is what gates account order history and
+    // points, not this.
+    if (context.channelIdentityId) {
         owner.push({ channelIdentity: context.channelIdentityId });
     }
     if (!owner.length) return null;
@@ -466,9 +469,9 @@ const SUPPORT_TOOLS = [
             const owner = [];
             if (context.userId) owner.push({ user: context.userId });
             if (context.email) owner.push({ customerEmail: String(context.email).toLowerCase() });
-            // Verified chat customers own orders through their handle - see
-            // findOwnedOrder for why unverified handles are excluded.
-            if (context.channelIdentityId && context.identityStatus !== 'unverified') {
+            // Their own channel orders - see findOwnedOrder for why the handle
+            // alone is enough here.
+            if (context.channelIdentityId) {
                 owner.push({ channelIdentity: context.channelIdentityId });
             }
 
@@ -754,21 +757,18 @@ const SUPPORT_TOOLS = [
         handler: async (input, context) => {
             // Guard 1: identity. An order is a real delivery obligation, so we
             // must know who it is for. Two ways to know that: a signed-in
-            // website account, or a chat handle whose owner has proved they
-            // control it. An unverified handle is nobody - anyone can message
-            // from a number they do not own.
-            const isChannelCustomer =
-                !context.userId &&
-                Boolean(context.channelIdentityId) &&
-                context.identityStatus !== 'unverified';
+            // website account, or a chat thread whose sender Meta has already
+            // authenticated for us via a signed webhook. The second is enough
+            // to order on WhatsApp or Instagram without any Steth account -
+            // the order belongs to the handle, and only that handle can see it
+            // afterwards.
+            const isChannelCustomer = !context.userId && Boolean(context.channelIdentityId);
 
             if (!context.userId && !isChannelCustomer) {
                 return {
                     placed: false,
                     reason: 'not-identified',
-                    message: context.channelIdentityId
-                        ? 'This handle is not verified yet. Ask them to confirm the code we sent before ordering.'
-                        : 'The customer must be signed in before an order can be placed.'
+                    message: 'The customer must be signed in before an order can be placed.'
                 };
             }
 
@@ -810,6 +810,18 @@ const SUPPORT_TOOLS = [
                     reason: 'no-address',
                     message:
                         'Ask the customer for their full delivery address - name, street and city - and save it with save_delivery_address before ordering.'
+                };
+            }
+
+            // A courier cannot deliver without a contact number. WhatsApp
+            // supplies one automatically; Instagram does not, so it has to be
+            // asked for rather than discovered at the door.
+            if (isChannelCustomer && !identity.deliveryAddress?.phoneNumber) {
+                return {
+                    placed: false,
+                    reason: 'no-phone',
+                    message:
+                        'Ask the customer for a contact phone number for the courier, save it with save_delivery_address, then place the order.'
                 };
             }
 
@@ -1070,13 +1082,6 @@ const SUPPORT_TOOLS = [
                     message: 'This only applies to chat customers. A website customer manages addresses in their account.'
                 };
             }
-            if (context.identityStatus === 'unverified') {
-                return {
-                    saved: false,
-                    message: 'This handle is not verified yet, so no address can be stored against it.'
-                };
-            }
-
             const identity = await ChannelIdentity.findById(context.channelIdentityId);
             if (!identity) return { saved: false, message: 'Chat identity not found.' };
 
@@ -1089,6 +1094,10 @@ const SUPPORT_TOOLS = [
                 country: 'Pakistan',
                 // Falls back to the handle itself for WhatsApp, which is
                 // already a working phone number the courier can call.
+                // WhatsApp's handle is already a working number the courier can
+                // call. Instagram's is an opaque id, so a real phone number has
+                // to be asked for there - a parcel with no contact number is
+                // a failed delivery.
                 phoneNumber: input.phoneNumber
                     ? String(input.phoneNumber).trim()
                     : identity.channel === 'whatsapp'
