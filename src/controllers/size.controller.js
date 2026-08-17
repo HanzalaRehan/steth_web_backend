@@ -41,15 +41,18 @@
 const SizeProfile = require('../models/sizeProfile.model');
 const User = require('../models/user.model');
 const Order = require('../models/order.model');
+const rewardsService = require('../services/rewards.service');
+const { getRule } = require('../config/rewardRules');
 const { catchAsync } = require('../utils/errorHandler');
 const { SIZES, TOP_CHART, PANTS_CHART, PANTS_LENGTH_ADJUSTMENT_INCHES } = require('../utils/sizeChart');
 const { recommendSize, FIT_PREFERENCES } = require('../utils/sizeRecommendation');
 
-// Loyalty points paid for completing the size quiz, once per customer.
-// Kept as a named constant rather than an inline number because the rewards
-// programme rules are still being finalised on the business side (issue #22) -
-// when they land, this is the one line to change.
-const SIZE_QUIZ_REWARD_POINTS = 50;
+// The quiz's points come from the loyalty programme catalogue (the
+// SIZING_QUIZ rule), not from a number kept here. The quiz owns the
+// interaction; the rewards service owns the points, the one-time guarantee
+// and the ledger entry - so there is a single place where a customer's
+// balance can change, and a single place where point values are set.
+const SIZE_QUIZ_RULE_KEY = 'SIZING_QUIZ';
 
 // Tag written onto every recommendation this version of the code produces, so
 // rule-era rows stay distinguishable once a trained model starts writing here.
@@ -138,39 +141,32 @@ const saveSubmission = async (userId, measurements, recommendation) => {
 };
 
 /**
- * Pays the one-time quiz completion bonus. Idempotent: the quizCompleted flag
- * on the profile is the guard, so replaying the endpoint tops up nothing.
+ * Pays the one-time quiz completion bonus through the loyalty programme.
+ *
+ * Idempotency is the rewards ledger's unique index, not the quizCompleted
+ * flag - two concurrent submissions both pass a flag check, but only one can
+ * win the index. The flag is still maintained afterwards because the size
+ * profile reports it back to the quiz page.
+ *
  * @param {Object} profile - The customer's SizeProfile document.
  * @param {ObjectId} userId - Owning user.
  * @returns {Promise<Object>} { pointsAwarded, alreadyCompleted, totalPoints }
  */
 const awardQuizPoints = async (profile, userId) => {
-    if (profile.quizCompleted) {
-        const user = await User.findById(userId).select('rewardPoints');
-        return {
-            pointsAwarded: 0,
-            alreadyCompleted: true,
-            totalPoints: user ? user.rewardPoints : 0
-        };
+    const award = await rewardsService.awardRule(userId, SIZE_QUIZ_RULE_KEY);
+    const user = await User.findById(userId).select('rewardPoints');
+
+    if (award.awarded) {
+        profile.quizCompleted = true;
+        profile.quizPointsAwarded = award.points;
+        profile.quizCompletedAt = new Date();
+        await profile.save();
     }
 
-    // Mirrors how order.controller.js credits points - increment the single
-    // User.rewardPoints balance rather than introducing a parallel ledger.
-    const user = await User.findByIdAndUpdate(
-        userId,
-        { $inc: { rewardPoints: SIZE_QUIZ_REWARD_POINTS } },
-        { new: true }
-    ).select('rewardPoints');
-
-    profile.quizCompleted = true;
-    profile.quizPointsAwarded = SIZE_QUIZ_REWARD_POINTS;
-    profile.quizCompletedAt = new Date();
-    await profile.save();
-
     return {
-        pointsAwarded: SIZE_QUIZ_REWARD_POINTS,
-        alreadyCompleted: false,
-        totalPoints: user ? user.rewardPoints : SIZE_QUIZ_REWARD_POINTS
+        pointsAwarded: award.points,
+        alreadyCompleted: award.alreadyEarned,
+        totalPoints: user ? user.rewardPoints : award.points
     };
 };
 
@@ -400,6 +396,7 @@ exports.submitFitFeedback = catchAsync(async (req, res) => {
 });
 
 // Exported for unit tests and for reuse by any future admin/reporting endpoint.
-exports.SIZE_QUIZ_REWARD_POINTS = SIZE_QUIZ_REWARD_POINTS;
+// Reads through to the catalogue so it can never disagree with what is paid.
+exports.SIZE_QUIZ_REWARD_POINTS = getRule(SIZE_QUIZ_RULE_KEY).points;
 exports.parseMeasurements = parseMeasurements;
 exports.getOrderedSizeStats = getOrderedSizeStats;
