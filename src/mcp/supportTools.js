@@ -38,6 +38,7 @@ const Product = require('../models/product.model');
 const Order = require('../models/order.model');
 const User = require('../models/user.model');
 const ChannelIdentity = require('../models/channelIdentity.model');
+const SupportEscalation = require('../models/supportEscalation.model');
 const orderController = require('../controllers/order.controller');
 const { recommendSize } = require('../utils/sizeRecommendation');
 const rewardsService = require('../services/rewards.service');
@@ -1127,24 +1128,34 @@ const SUPPORT_TOOLS = [
             required: ['reason']
         },
         handler: async (input, context) => {
-            // Deliberately just a durable record. Wiring this to a helpdesk
-            // (email, Slack, Zendesk) is a follow-up, and the agent must be able
-            // to hand over correctly before that exists.
-            console.warn('[support-agent] escalation', {
-                channel: context.channel,
-                userId: context.userId || null,
-                email: context.email || null,
-                reason: input.reason
+            // Writes the handover to a real queue rather than a log line. That
+            // is what makes "a colleague will get back to you" true: the
+            // conversation is recorded, addressable and waiting, whoever
+            // eventually works the queue. Routing it onward - helpdesk, Slack,
+            // a rota - is a separate job and deliberately not done here.
+            const escalation = await SupportEscalation.create({
+                channel: context.channel || 'website',
+                reason: String(input.reason || 'Customer asked for a human.').trim(),
+                user: context.userId || null,
+                channelIdentity: context.channelIdentityId || null,
+                handle: context.handle || null,
+                email: context.email || null
+            });
+
+            console.warn('[support-agent] escalation queued', {
+                id: String(escalation._id),
+                channel: escalation.channel,
+                reason: escalation.reason
             });
             return {
                 escalated: true,
-                // Worded carefully: this records the handover, it does not
-                // page anyone. Saying "notified" made the agent promise
-                // callbacks "within the hour" in testing - a commitment
-                // nothing in this system can keep. Until a helpdesk is wired
-                // up, the tool must not imply one exists.
+                escalationId: String(escalation._id),
+                // "Shortly" is as specific as this can honestly get. A named
+                // time - "within the hour" - is a commitment nothing here
+                // controls, and the agent promised exactly that in testing
+                // until it was told not to.
                 message:
-                    'The conversation has been flagged for a human agent. Do not promise the customer a callback time.'
+                    'Queued for a human agent. Tell the customer a colleague will get back to them shortly. Do not give a specific time, and do not promise a phone call.'
             };
         }
     }
