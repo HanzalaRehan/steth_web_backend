@@ -29,6 +29,11 @@ router.post('/claim', auth, rewardsController.claimReward);
 router.post('/sync', auth, rewardsController.syncRewards);
 router.post('/birthday', auth, rewardsController.setDateOfBirth);
 
+// WhatsApp number ownership - the gate on both marketing consent and on
+// matching an inbound WhatsApp message to this account.
+router.post('/whatsapp/verify/start', auth, rewardsController.startWhatsappVerification);
+router.post('/whatsapp/verify/confirm', auth, rewardsController.confirmWhatsappVerification);
+
 // Admin - current values plus what still needs a business decision.
 router.get('/config', auth, isAdmin, rewardsController.getConfig);
 

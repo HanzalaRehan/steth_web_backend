@@ -67,7 +67,16 @@ const userSchema = new Schema({
       whatsapp: { type: Boolean, default: false },
       whatsappNumber: { type: String, trim: true },
       whatsappVerified: { type: Boolean, default: false },
-      whatsappVerifiedAt: { type: Date }
+      whatsappVerifiedAt: { type: Date },
+      // In-flight one-time code. The code itself is never stored - only its
+      // hash - so a leaked database cannot be used to verify other people's
+      // numbers. Cleared the moment verification succeeds.
+      whatsappVerification: {
+        codeHash: String,
+        expiresAt: Date,
+        attempts: { type: Number, default: 0 },
+        sentAt: Date
+      }
     },
     addresses: [{
       type: {
